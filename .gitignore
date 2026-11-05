@@ -1,0 +1,9 @@
+/node_modules/
+/web/node_modules/
+/dist/
+/data/
+/.cache/
+*.log
+/web/dist/
+__pycache__/
+*.pyc
