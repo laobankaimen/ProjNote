@@ -5,7 +5,7 @@ import Pager from '../components/Pager.vue'
 import { api, dateTimeLabel, loadProjects, messageOf, notify, query } from '../api'
 import type { Page, TrashEntry } from '../types'
 const props=defineProps<{revision:number}>();const emit=defineEmits<{changed:[]}>();const items=ref<TrashEntry[]>([]),kind=ref(''),total=ref(0),offset=ref(0),error=ref(''),loading=ref(false),restoring=ref('');const limit=30
-const names:Record<string,string>={projects:'项目',tasks:'任务',records:'记录',issues:'问题',worklogs:'日志',time_entries:'工时',reminders:'提醒',team_daily_entries:'人员工作记录',project_daily_logs:'项目日志',meeting_minutes:'会议纪要'}
+const names:Record<string,string>={projects:'项目',tasks:'任务',records:'记录',issues:'问题',worklogs:'日志',time_entries:'工时',reminders:'提醒',team_daily_entries:'人员工作记录',project_daily_logs:'项目日志',meeting_minutes:'会议纪要',requirements:'需求'}
 async function load(){loading.value=true;error.value='';try{const page=await api<Page<TrashEntry>>(`/api/trash?${query({kind:kind.value,limit,offset:offset.value})}`);items.value=page.items;total.value=page.total}catch(e){error.value=messageOf(e)}finally{loading.value=false}}
 async function restore(item:TrashEntry){restoring.value=item.id;try{await api(`/api/trash/${item.entity_type}/${item.id}/restore`,{method:'POST',body:JSON.stringify({version:item.version})});notify('已恢复');await loadProjects();emit('changed');await load()}catch(e){error.value=messageOf(e)}finally{restoring.value=''}}
 onMounted(load);watch(()=>props.revision,load);watch(kind,()=>{offset.value=0;void load()});function page(next:number){offset.value=next;void load()}

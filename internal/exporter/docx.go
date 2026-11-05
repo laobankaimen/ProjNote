@@ -18,7 +18,7 @@ const MaxTemplate = 8 << 20
 const maxExpanded = 32 << 20
 
 var tokenRE = regexp.MustCompile(`\{\{([^{}]+)\}\}`)
-var known = map[string]bool{"title": true, "content": true, "project_name": true, "date": true, "person_name": true, "operator": true, "source_version": true, "source_kind": true, "meeting_date": true, "location": true, "attendees": true, "code": true, "status": true, "owner": true, "description": true, "root_cause": true, "solution": true, "verify_result": true, "label": true, "value": true, "#rows": true, "/rows": true}
+var known = map[string]bool{"title": true, "content": true, "project_name": true, "date": true, "person_name": true, "operator": true, "source_version": true, "source_kind": true, "meeting_date": true, "location": true, "attendees": true, "acceptance_criteria": true, "acceptance_note": true, "change_note": true, "revision": true, "code": true, "status": true, "owner": true, "description": true, "root_cause": true, "solution": true, "verify_result": true, "label": true, "value": true, "#rows": true, "/rows": true}
 
 type node struct {
 	Name     string

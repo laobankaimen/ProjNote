@@ -365,6 +365,37 @@ func Extract(archive, parent string) (string, Manifest, error) {
 			}
 		}
 
+		if err == nil && version >= 8 {
+			for _, spec := range []struct {
+				table, fields string
+				count         int
+			}{
+				{"plan_versions", "'id','project_id','number','name','description','created_by','created_at','snapshot','hash','task_count','version'", 11},
+				{"requirements", "'id','project_id','code','title','description','acceptance_criteria','owner','source','status','revision','acceptance_note','change_note','created_at','updated_at','version','deleted_at'", 16},
+				{"requirement_task_links", "'requirement_id','task_id'", 2},
+				{"requirement_revisions", "'requirement_id','revision','created_by','created_at','change_note','snapshot','hash'", 7},
+			} {
+				var count int
+				err = db.QueryRow("SELECT count(*) FROM pragma_table_info('" + spec.table + "') WHERE name IN (" + spec.fields + ")").Scan(&count)
+				if err == nil && count != spec.count {
+					err = errors.New("备份缺少此数据库版本必需的计划或需求字段：" + spec.table)
+				}
+				if err != nil {
+					break
+				}
+			}
+			if err == nil {
+				var count int
+				err = db.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='trigger' AND name IN ('plan_versions_immutable_update','plan_versions_immutable_delete','requirement_revisions_immutable_update','requirement_revisions_immutable_delete')").Scan(&count)
+				if err == nil && count != 4 {
+					err = errors.New("备份缺少计划或需求历史版本的只读保护")
+				}
+			}
+			if err == nil {
+				err = validateVersionSnapshots(db)
+			}
+		}
+
 	}
 	cerr := db.Close()
 	if err == nil {
@@ -450,4 +481,40 @@ func CheckInterrupted(root string) error {
 		}
 	}
 	return nil
+}
+
+// Version rows are independent saved content. Validate their frozen bytes before
+// installing a backup, even if its outer ZIP manifest has been recomputed.
+func validateVersionSnapshots(db *sql.DB) error {
+	for _, table := range []string{"plan_versions", "requirement_revisions"} {
+		rows, err := db.Query("SELECT snapshot,hash FROM " + table)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var snapshot, expected string
+			if err = rows.Scan(&snapshot, &expected); err != nil {
+				break
+			}
+			sum := sha256.Sum256([]byte(snapshot))
+			var object map[string]any
+			if json.Unmarshal([]byte(snapshot), &object) != nil || object == nil || hex.EncodeToString(sum[:]) != expected {
+				err = errors.New("备份中的计划或需求历史版本内容校验失败")
+				break
+			}
+		}
+		if err == nil {
+			err = rows.Err()
+		}
+		_ = rows.Close()
+		if err != nil {
+			return err
+		}
+	}
+	var missing int
+	err := db.QueryRow("SELECT count(*) FROM requirements r WHERE NOT EXISTS(SELECT 1 FROM requirement_revisions v WHERE v.requirement_id=r.id AND v.revision=r.revision) OR r.revision!=(SELECT count(*) FROM requirement_revisions v WHERE v.requirement_id=r.id) OR r.revision!=(SELECT MAX(revision) FROM requirement_revisions v WHERE v.requirement_id=r.id)").Scan(&missing)
+	if err == nil && missing > 0 {
+		return errors.New("备份中的需求缺少完整历史版本")
+	}
+	return err
 }

@@ -23,6 +23,7 @@ const (
 	compactMode         = 1011
 	compactHeading      = 1012
 	compactTodayHeading = 1013
+	compactFull         = 1014
 )
 
 const compactPanelStyle = 0x80000000
@@ -142,6 +143,7 @@ func (e *windowsCompact) showPanel() {
 		e.createControl("STATIC", "今日任务", compactTodayHeading, 0)
 		e.createControl("LISTBOX", "", compactTasks, 0x00800000|0x00200000|0x0001|0x1000)
 		e.createControl("BUTTON", "×", compactClose, 0x00010000)
+		e.createControl("BUTTON", "打开完整工作台", compactFull, 0x00010000)
 		e.createControl("STATIC", "版本读取中…", compactVersion, 0x0002)
 		go func() {
 			version, err := e.client.version(e.ctx)
@@ -185,7 +187,7 @@ func (e *windowsCompact) layoutPanel() {
 		compactHeading: layout.Heading, compactMode: layout.Mode, compactProjectID: layout.Project,
 		compactBody: layout.Body, compactSave: layout.Save, compactRestore: layout.Restore, compactRefresh: layout.Refresh,
 		compactStatus: layout.Status, compactTodayHeading: layout.TodayHeading, compactTasks: layout.Tasks,
-		compactClose: layout.Close, compactVersion: layout.Version,
+		compactClose: layout.Close, compactFull: layout.Full, compactVersion: layout.Version,
 	} {
 		compactUser32.NewProc("MoveWindow").Call(e.controls[id], uintptr(rect.Left), uintptr(rect.Top), uintptr(rect.width()), uintptr(rect.height()), 1)
 	}
@@ -556,6 +558,8 @@ func (e *windowsCompact) panelProc(message uint32, wparam, lparam uintptr) uintp
 				e.refreshPanel()
 			case compactClose:
 				e.hidePanel()
+			case compactFull:
+				e.open(true)
 			case compactRestore:
 				result, _, _ := compactUser32.NewProc("MessageBoxW").Call(e.panel, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("用服务端正文草稿替换当前内容？"))), uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("恢复草稿"))), 0x00000001|0x00000020)
 				if result == 1 {

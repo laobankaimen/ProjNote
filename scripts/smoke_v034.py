@@ -148,7 +148,7 @@ class StartupRun:
         assert 1024 <= self.port <= 65436, self.port
         self.log_path = harness.root / f"服务-{len(harness.runs)}.log"
         self.log = self.log_path.open("w+", encoding="utf-8")
-        self.args = [harness.binary, "--data-dir", str(self.root), "--port", str(self.port), *flags]
+        self.args = [harness.binary, "--data-dir", str(self.root), "--port", str(self.port), "--foreground", *flags]
         self.process = subprocess.Popen(self.args, stdout=self.log, stderr=subprocess.STDOUT,
                                         env=harness.env)
         self.runtime = None
@@ -183,7 +183,7 @@ class StartupRun:
     def repeat(self, *flags):
         before = self.runtime.copy()
         result = subprocess.run(
-            [self.harness.binary, "--data-dir", str(self.root), "--port", str(self.port), *flags],
+            [self.harness.binary, "--data-dir", str(self.root), "--port", str(self.port), "--foreground", *flags],
             capture_output=True, text=True, env=self.harness.env, timeout=20,
         )
         assert result.returncode == 0, (result.returncode, result.stdout, result.stderr)
@@ -410,7 +410,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", nargs="?", help="path to newly compiled ProjNote")
     parser.add_argument("--binary", dest="binary_option", help="alternative explicit binary path")
-    parser.add_argument("--expected-version", default="0.3.5", help="expected binary version prefix")
+    parser.add_argument("--expected-version", default="0.4.0", help="expected binary version prefix")
     parser.add_argument("--native", action="store_true", help="observe actual Linux GTK helper/windows")
     args = parser.parse_args()
     if args.binary and args.binary_option and Path(args.binary).resolve() != Path(args.binary_option).resolve():

@@ -173,9 +173,14 @@ tasks_scroll = Gtk.ScrolledWindow()
 tasks_scroll.set_min_content_height(132)
 tasks_scroll.add(tasks)
 outer.pack_start(tasks_scroll, True, True, 0)
+footer = Gtk.Box(spacing=8)
+full_button = Gtk.Button(label="打开完整工作台")
+full_button.set_tooltip_text("在浏览器中打开工作台，便签正文继续保留")
+footer.pack_start(full_button, False, False, 0)
 version_label = Gtk.Label(label="版本读取中…", xalign=1)
 version_label.get_style_context().add_class("hint")
-outer.pack_start(version_label, False, False, 0)
+footer.pack_end(version_label, True, True, 0)
+outer.pack_start(footer, False, False, 0)
 
 
 def current():
@@ -524,6 +529,8 @@ def test_action(command):
         ensure_project(command.get("project_id", ""))
     elif action == "save":
         save_button.clicked()
+    elif action == "full_button":
+        full_button.clicked()
     elif action == "close_button":
         close_button.clicked()
     elif action == "entry_click":
@@ -597,7 +604,7 @@ def test_action(command):
                     "saving": state["saving"], "draft_busy": state["draft_busy"],
                     "conflict": state["conflict"], "task_count": len(tasks.get_children()), "task_items": state["task_items"], "save_label": save_button.get_label(),
                     "entry_text": entry_open.get_label(), "panel_decorated": panel.get_decorated(), "panel_resizable": panel.get_resizable(),
-                    "close_text": close_button.get_label(), "menu_items": list(menu_actions), "version_text": version_label.get_text(),
+                    "full_text": full_button.get_label(), "close_text": close_button.get_label(), "menu_items": list(menu_actions), "version_text": version_label.get_text(),
                     "task_view_height": tasks_scroll.get_allocated_height(), "task_row_heights": [child.get_allocated_height() for child in tasks.get_children()],
                     "entry_geometry": {"x": ex, "y": ey, "width": ew, "height": eh},
                     "panel_geometry": {name: getattr(panel_frame, name) for name in ("x", "y", "width", "height")} if panel_frame else {"x": px, "y": py, "width": pw, "height": ph},
@@ -648,6 +655,7 @@ projects.connect("changed", schedule_draft)
 save_button.connect("clicked", save)
 refresh_button.connect("clicked", lambda *_: refresh())
 restore_button.connect("clicked", restore)
+full_button.connect("clicked", lambda *_: request("open_full"))
 close_button.connect("clicked", hide_panel)
 panel.connect("realize", lambda *_: panel.get_window().set_functions(Gdk.WMFunction.CLOSE))
 entry.connect("realize", lambda *_: entry.get_window().set_functions(Gdk.WMFunction(0)))

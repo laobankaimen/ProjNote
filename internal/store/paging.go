@@ -116,6 +116,13 @@ func filterWhere(kind string, filters map[string]string) (string, []any, error) 
 	return where, args, nil
 }
 func listRows(q queryer, kind string, filters map[string]string) ([]map[string]any, int, error) {
+	if kind == "plan_versions" {
+		page, err := listPlanVersions(q, "", filters)
+		if err != nil {
+			return nil, 0, err
+		}
+		return page["items"].([]map[string]any), page["total"].(int), nil
+	}
 	where, args, err := filterWhere(kind, filters)
 	if err != nil {
 		return nil, 0, err
@@ -151,6 +158,11 @@ func listRows(q queryer, kind string, filters map[string]string) ([]map[string]a
 	items, err := rawRows(rows)
 	for _, m := range items {
 		normalize(kind, m)
+		if kind == "requirements" {
+			if e := attachRequirementLinks(q, m); e != nil {
+				return nil, 0, e
+			}
+		}
 	}
 	if err == nil && kind == "tasks" {
 		err = attachTaskActuals(q, items, false)

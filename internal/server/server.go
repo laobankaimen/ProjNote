@@ -158,6 +158,14 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if kind == "plan-versions" || kind == "projects" && len(p) >= 3 && p[2] == "plan-versions" {
+		s.planVersionsAPI(w, r, p)
+		return
+	}
+	if kind == "requirements" && len(p) >= 3 && p[2] == "revisions" {
+		s.requirementRevisionsAPI(w, r, p)
+		return
+	}
 	if kind == "projects" && len(p) >= 3 && p[2] == "import" {
 		s.importTasks(w, r, p)
 		return
@@ -335,7 +343,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-	case "projects", "tasks", "records", "issues", "worklogs", "meeting_minutes":
+	case "projects", "tasks", "records", "issues", "worklogs", "meeting_minutes", "requirements":
 		if r.Method == "POST" && ((kind == "tasks" && len(p) == 2 && p[1] == "batch") || (kind == "tasks" && len(p) == 3 && (p[2] == "move" || p[2] == "reopen")) || (kind == "records" && len(p) == 2 && p[1] == "batch-classify")) {
 			input, ok := body(w, r)
 			if !ok {

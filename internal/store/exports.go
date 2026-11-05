@@ -14,8 +14,8 @@ import (
 
 func exportKind(kind string) (string, error) {
 	kind = strings.ReplaceAll(kind, "-", "_")
-	if !oneOf(kind, "worklogs", "project_daily_logs", "issues", "meeting_minutes") {
-		return "", invalid("仅支持个人日志、项目日报、会议纪要和问题的导出")
+	if !oneOf(kind, "worklogs", "project_daily_logs", "issues", "meeting_minutes", "requirements", "plan_versions") {
+		return "", invalid("请选择已保存的日志、会议纪要、问题、需求或计划版本")
 	}
 	return kind, nil
 }
@@ -24,13 +24,23 @@ func exportSnapshot(q queryer, kind, id string) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	entity, err := get(q, kind, id)
+	var entity map[string]any
+	if kind == "plan_versions" {
+		entity, err = planVersion(q, id)
+	} else {
+		entity, err = get(q, kind, id)
+	}
 	if err != nil {
 		return nil, err
 	}
 	project := map[string]any{}
 	projectName := "跨项目"
-	if pid := text(entity["project_id"]); pid != "" {
+	if kind == "plan_versions" {
+		if snapshot, ok := entity["snapshot"].(map[string]any); ok {
+			project, _ = snapshot["project"].(map[string]any)
+			projectName = text(project["name"])
+		}
+	} else if pid := text(entity["project_id"]); pid != "" {
 		project, err = get(q, "projects", pid)
 		if err != nil {
 			return nil, err
@@ -77,6 +87,40 @@ func exportSnapshot(q queryer, kind, id string) (map[string]any, error) {
 		fmt.Fprintf(&b, "\n## 纪要正文\n\n%s", content)
 		content = b.String()
 	}
+	if kind == "requirements" {
+		scope = "项目需求"
+		title = text(entity["code"]) + " · " + text(entity["title"])
+		person = text(entity["owner"])
+		date = strings.SplitN(text(entity["updated_at"]), "T", 2)[0]
+		var b strings.Builder
+		fmt.Fprintf(&b, "# %s\n\n项目：%s\n需求版本：%s\n负责人：%s\n状态：%s\n", title, projectName, text(entity["revision"]), person, map[string]string{"pending": "待确认", "doing": "执行中", "accepted": "已验收", "void": "已作废"}[text(entity["status"])])
+		for _, field := range []struct{ key, label string }{{"description", "需求描述"}, {"acceptance_criteria", "验收准则"}, {"source", "需求来源"}, {"acceptance_note", "验收说明"}, {"change_note", "本次变更说明"}} {
+			fmt.Fprintf(&b, "\n## %s\n\n%s\n", field.label, text(entity[field.key]))
+		}
+		b.WriteString("\n## 关联任务\n\n")
+		for _, task := range exportObjects(entity["linked_tasks"]) {
+			recycled := ""
+			if nonempty(task["deleted_at"]) {
+				recycled = "（已回收）"
+			}
+			fmt.Fprintf(&b, "- %s %s%s（任务 ID：%s）\n", text(task["wbs_code"]), text(task["name"]), recycled, text(task["id"]))
+		}
+		content = b.String()
+	}
+	if kind == "plan_versions" {
+		scope = "项目计划版本"
+		title = projectName + " · " + text(entity["name"])
+		person = text(entity["created_by"])
+		date = strings.SplitN(text(entity["created_at"]), "T", 2)[0]
+		var b strings.Builder
+		fmt.Fprintf(&b, "# %s\n\n计划版本：%s\n保存人：%s\n保存时间：%s\n计划任务数：%s\n内容 SHA-256：%s\n\n## 版本说明\n\n%s\n\n## 完整计划\n\n", title, text(entity["number"]), person, text(entity["created_at"]), text(entity["task_count"]), text(entity["hash"]), text(entity["description"]))
+		if source, ok := entity["snapshot"].(map[string]any); ok {
+			for _, task := range exportObjects(source["tasks"]) {
+				fmt.Fprintf(&b, "### %s %s\n\n任务 ID：%s\n负责人：%s\n计划开始：%s\n计划结束：%s\n预计工时：%s 小时\n父任务 ID：%s\n\n%s\n\n", text(task["wbs_code"]), text(task["name"]), text(task["id"]), text(task["assignee"]), text(task["plan_start"]), text(task["plan_end"]), text(task["estimate_hours"]), text(task["parent_id"]), text(task["description"]))
+			}
+		}
+		content = b.String()
+	}
 	rows := []map[string]any{}
 	add := func(key, label string, value any) {
 		rows = append(rows, map[string]any{"key": key, "label": label, "value": value})
@@ -102,11 +146,24 @@ func exportSnapshot(q queryer, kind, id string) (map[string]any, error) {
 			add(field.key, field.label, entity[field.key])
 		}
 	}
+	if kind == "requirements" {
+		for _, field := range []struct{ key, label string }{{"code", "需求编号"}, {"revision", "需求版本"}, {"status", "状态"}, {"owner", "负责人"}, {"source", "需求来源"}, {"acceptance_criteria", "验收准则"}, {"acceptance_note", "验收说明"}, {"change_note", "变更说明"}} {
+			add(field.key, field.label, entity[field.key])
+		}
+	}
+	if kind == "plan_versions" {
+		for _, field := range []struct{ key, label string }{{"number", "计划版本"}, {"name", "版本名称"}, {"description", "版本说明"}, {"created_by", "保存人"}, {"task_count", "任务数量"}, {"hash", "计划内容 SHA-256"}} {
+			add(field.key, field.label, entity[field.key])
+		}
+	}
 	add("created_at", "创建时间", entity["created_at"])
 	add("updated_at", "更新时间", entity["updated_at"])
 	snapshot := map[string]any{"snapshot_format": 1, "source_kind": kind, "source_id": id, "source_version": entity["version"], "title": strings.TrimSpace(title), "content": content, "project_id": text(entity["project_id"]), "project_name": projectName, "project": project, "person_name": person, "entered_by": enteredBy, "export_operator": operator(q), "period_type": period, "log_date": date, "scope": scope, "fields": entity, "rows": rows, "captured_at": now()}
 	if kind == "project_daily_logs" {
 		snapshot["source_snapshot"] = entity["source_snapshot"]
+	}
+	if kind == "plan_versions" {
+		snapshot["source_snapshot"] = entity["snapshot"]
 	}
 	return snapshot, nil
 }
@@ -424,4 +481,20 @@ func (s *Store) InvalidateExportJob(id string, input map[string]any) (map[string
 		}
 		return after, nil
 	})
+}
+
+func exportObjects(value any) []map[string]any {
+	switch items := value.(type) {
+	case []map[string]any:
+		return items
+	case []any:
+		out := make([]map[string]any, 0, len(items))
+		for _, item := range items {
+			if m, ok := item.(map[string]any); ok {
+				out = append(out, m)
+			}
+		}
+		return out
+	}
+	return nil
 }

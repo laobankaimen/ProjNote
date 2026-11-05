@@ -1,6 +1,6 @@
 GO ?= go
 NPM_FLAGS ?=
-.PHONY: web build linux windows test run
+.PHONY: web build linux windows windows-cli test run
 web:
 	cd web && npm ci $(NPM_FLAGS) && npm run build
 	rm -rf internal/webui/dist
@@ -12,9 +12,12 @@ build:
 linux: build
 windows:
 	mkdir -p dist
-	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GO) build -trimpath -ldflags '-s -w' -o dist/ProjNote.exe ./cmd/projnote
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GO) build -trimpath -ldflags '-s -w -H windowsgui' -o dist/ProjNote.exe ./cmd/projnote
+windows-cli:
+	mkdir -p dist
+	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 $(GO) build -trimpath -ldflags '-s -w' -o dist/ProjNote-cli.exe ./cmd/projnote
 test:
 	$(GO) test ./...
 	$(GO) vet ./...
 run:
-	$(GO) run ./cmd/projnote --data-dir ./data
+	$(GO) run ./cmd/projnote --foreground --data-dir ./data

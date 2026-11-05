@@ -16,6 +16,8 @@ from smoke_v032 import completed_job, digest, export_job, read_docx
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary')
+    parser.add_argument('--expected-version', default='0.4.0')
+    parser.add_argument('--expected-schema', type=int, default=8)
     args = parser.parse_args()
     binary = str(Path(args.binary).resolve(strict=True))
     with tempfile.TemporaryDirectory(prefix='projnote-meetings-') as temp:
@@ -27,7 +29,7 @@ def main():
         restored = BinaryServer(binary, root / '恢复目录 中文', port)
         try:
             original.start()
-            assert original.api('GET', '/api/health')['version'].startswith('0.3.5')
+            assert original.api('GET', '/api/health')['version'].startswith(args.expected_version)
             original.api('PUT', '/api/settings', {'operator': '纪要验收人', 'backup_auto': '0'})
             project = original.api('POST', '/api/projects', {'name': '会议协调项目'}, 201)
             meeting = original.api('POST', '/api/meeting-minutes', {
@@ -76,7 +78,7 @@ def main():
             archive = root / '完整会议备份.zip'
             archive.write_bytes(original.download('/api/backups/' + package['name'] + '/download'))
             with zipfile.ZipFile(archive) as document:
-                assert int.from_bytes(document.read('app.db')[60:64], 'big') == 7
+                assert int.from_bytes(document.read('app.db')[60:64], 'big') == args.expected_schema
                 assert not any(name.startswith('exports/') for name in document.namelist())
             original.stop()
             assert '校验通过' in restored.cli('--verify-backup', archive).stdout
@@ -93,7 +95,7 @@ def main():
             completed_job(restored, export_job(restored, 'meeting_minutes', meeting, 'docx'))
             assert restored.api('GET', '/api/audit/verify')['ok'] is True
             restored.stop()
-            print('PASS: meeting CRUD/409/history/search/recycle, five exports with frozen metadata, schema7 full backup/restore and draft preservation, re-export after recovery')
+            print('PASS: meeting CRUD/409/history/search/recycle, five exports with frozen metadata, complete backup/restore and draft preservation, re-export after recovery')
         finally:
             original.cleanup()
             restored.cleanup()

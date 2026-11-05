@@ -124,6 +124,9 @@ func subtree(tx *sql.Tx, id string) ([]map[string]any, error) {
 	return all, err
 }
 func (s *Store) SoftDelete(kind, id string, input map[string]any) (map[string]any, error) {
+	if kind == "plan_versions" {
+		return nil, immutablePlanError()
+	}
 	if err := kindOK(kind); err != nil {
 		return nil, err
 	}
@@ -149,6 +152,11 @@ func (s *Store) SoftDelete(kind, id string, input map[string]any) (map[string]an
 		if err = projectWritable(tx, pid, ""); err != nil {
 			return nil, err
 		}
+		if kind == "requirements" {
+			if err = planningProjectWritable(tx, pid); err != nil {
+				return nil, err
+			}
+		}
 		if kind == "meeting_minutes" {
 			if err = meetingProjectWritable(tx, pid); err != nil {
 				return nil, err
@@ -161,7 +169,7 @@ func (s *Store) SoftDelete(kind, id string, input map[string]any) (map[string]an
 		}
 		items := []map[string]any{m}
 		if kind == "projects" {
-			for _, child := range []string{"tasks", "records", "issues", "worklogs", "time_entries", "reminders", "team_daily_entries", "project_daily_logs", "meeting_minutes"} {
+			for _, child := range []string{"tasks", "records", "issues", "worklogs", "time_entries", "reminders", "team_daily_entries", "project_daily_logs", "meeting_minutes", "requirements", "plan_versions"} {
 				var n int
 				if err = tx.QueryRow("SELECT count(*) FROM "+child+" WHERE project_id=?", id).Scan(&n); err != nil {
 					return nil, err
@@ -255,7 +263,7 @@ func (s *Store) ListTrash(filters map[string]string) (map[string]any, error) {
 		}
 	}
 	all := []map[string]any{}
-	for _, k := range []string{"projects", "tasks", "records", "issues", "worklogs", "time_entries", "reminders", "team_daily_entries", "project_daily_logs", "meeting_minutes"} {
+	for _, k := range []string{"projects", "tasks", "records", "issues", "worklogs", "time_entries", "reminders", "team_daily_entries", "project_daily_logs", "meeting_minutes", "requirements"} {
 		if kind != "" && kind != k {
 			continue
 		}
@@ -269,6 +277,11 @@ func (s *Store) ListTrash(filters map[string]string) (map[string]any, error) {
 		}
 		for _, m := range items {
 			normalize(k, m)
+			if k == "requirements" {
+				if e := attachRequirementLinks(s.DB, m); e != nil {
+					return nil, e
+				}
+			}
 			m["entity_type"] = k
 			all = append(all, m)
 		}
@@ -296,6 +309,9 @@ func (s *Store) ListTrash(filters map[string]string) (map[string]any, error) {
 	return map[string]any{"items": all[offset:end], "total": total}, nil
 }
 func (s *Store) RestoreTrash(kind, id string, input map[string]any) (map[string]any, error) {
+	if kind == "plan_versions" {
+		return nil, immutablePlanError()
+	}
 	if err := kindOK(kind); err != nil {
 		return nil, err
 	}
@@ -326,6 +342,11 @@ func (s *Store) RestoreTrash(kind, id string, input map[string]any) (map[string]
 			}
 			if text(parent["project_id"]) != text(before["project_id"]) {
 				return nil, invalid("父子任务必须属于同一项目")
+			}
+		}
+		if kind == "requirements" {
+			if err = validateRequirement(tx, before, nil, nil); err != nil {
+				return nil, err
 			}
 		}
 		if kind == "meeting_minutes" {

@@ -536,7 +536,7 @@ func (s *Store) Demo() error {
 	}
 	defer tx.Rollback()
 	var count int
-	if err = tx.QueryRow("SELECT (SELECT count(*) FROM projects)+(SELECT count(*) FROM tasks)+(SELECT count(*) FROM records)+(SELECT count(*) FROM issues)+(SELECT count(*) FROM worklogs)+(SELECT count(*) FROM meeting_minutes)").Scan(&count); err != nil {
+	if err = tx.QueryRow("SELECT (SELECT count(*) FROM projects)+(SELECT count(*) FROM tasks)+(SELECT count(*) FROM records)+(SELECT count(*) FROM issues)+(SELECT count(*) FROM worklogs)+(SELECT count(*) FROM meeting_minutes)+(SELECT count(*) FROM requirements)+(SELECT count(*) FROM plan_versions)").Scan(&count); err != nil {
 		return err
 	}
 	if count > 0 {

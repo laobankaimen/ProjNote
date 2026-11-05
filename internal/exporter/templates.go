@@ -37,7 +37,7 @@ func LoadTemplate(root, id string) (Template, []byte, error) {
 	switch id {
 	case "builtin-journal":
 		data = journal
-		meta = Template{ID: id, Name: "日志 Word 模板", Format: "docx", Description: "个人日报/周报/月报、项目日报与会议纪要"}
+		meta = Template{ID: id, Name: "日志 Word 模板", Format: "docx", Description: "日志、会议纪要、项目需求与计划版本"}
 	case "builtin-issue":
 		data = issue
 		meta = Template{ID: id, Name: "问题单 Word 模板", Format: "docx", Description: "已保存问题详情与闭环字段"}

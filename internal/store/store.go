@@ -19,7 +19,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 7
+const SchemaVersion = 8
 
 type AppError struct {
 	Code    string
@@ -42,6 +42,8 @@ type queryer interface {
 }
 
 var columns = map[string][]string{
+	"plan_versions":      strings.Fields("id project_id number name description created_by created_at snapshot hash task_count version"),
+	"requirements":       strings.Fields("id project_id code title description acceptance_criteria owner source status revision acceptance_note change_note created_at updated_at version deleted_at"),
 	"projects":           strings.Fields("id code name customer phase manager start_date end_date status description created_at updated_at version deleted_at"),
 	"tasks":              strings.Fields("id project_id parent_id wbs_code name assignee plan_start plan_end progress status priority estimate_hours description actual_start actual_end created_at updated_at version sort_order deleted_at"),
 	"records":            strings.Fields("id code project_id type title content location occurred_at tags attachments created_at updated_at version deleted_at"),
@@ -130,7 +132,7 @@ func migrateAfter(tx *sql.Tx, version int) error {
 	for _, step := range []struct {
 		version int
 		apply   func(*sql.Tx) error
-	}{{2, migrateV2}, {3, migrateV3}, {4, migrateV4}, {5, migrateV5}, {6, migrateV6}, {7, migrateV7}} {
+	}{{2, migrateV2}, {3, migrateV3}, {4, migrateV4}, {5, migrateV5}, {6, migrateV6}, {7, migrateV7}, {8, migrateV8}} {
 		if version < step.version {
 			if err := step.apply(tx); err != nil {
 				return fmt.Errorf("升级数据库至版本 %d: %w", step.version, err)
@@ -273,6 +275,9 @@ func get(q queryer, kind, id string) (map[string]any, error) {
 	return getIncludingTrash(q, kind, id, false)
 }
 func getIncludingTrash(q queryer, kind, id string, trashed bool) (map[string]any, error) {
+	if kind == "plan_versions" {
+		return planVersion(q, id)
+	}
 	suffix := " AND deleted_at=''"
 	if trashed {
 		suffix = ""
@@ -293,6 +298,11 @@ func getIncludingTrash(q queryer, kind, id string, trashed bool) (map[string]any
 		return nil, fail("not_found", "记录不存在", 404)
 	}
 	m := normalize(kind, all[0])
+	if kind == "requirements" {
+		if err = attachRequirementLinks(q, m); err != nil {
+			return nil, err
+		}
+	}
 	if kind == "records" {
 		rows, e := q.Query("SELECT id,due_at,version,done_at FROM reminders WHERE record_id=? AND deleted_at=''", id)
 		if e != nil {
@@ -407,7 +417,7 @@ func searchSync(tx *sql.Tx, kind string, m map[string]any) error {
 		title = text(m["log_date"]) + " " + text(m["period_type"])
 	}
 	body := []string{}
-	for _, k := range []string{"code", "description", "content", "location", "root_cause", "solution", "verify_result", "owner", "assignee", "customer", "manager", "note", "work_date", "due_at", "person_name", "next_plan", "blockers", "attendees", "meeting_date"} {
+	for _, k := range []string{"code", "description", "content", "location", "root_cause", "solution", "verify_result", "owner", "assignee", "customer", "manager", "note", "work_date", "due_at", "person_name", "next_plan", "blockers", "attendees", "meeting_date", "acceptance_criteria", "source", "acceptance_note", "change_note"} {
 		if nonempty(m[k]) {
 			body = append(body, text(m[k]))
 		}
@@ -445,6 +455,13 @@ func cleanInput(kind string, input map[string]any, creating bool) (map[string]an
 		allowed[c] = true
 	}
 	for k, v := range input {
+		if kind == "requirements" && k == "task_ids" {
+			out[k] = v
+			continue
+		}
+		if kind == "requirements" && oneOf(k, "code", "revision") {
+			return nil, invalid("字段由服务器生成: " + k)
+		}
 		if kind == "meeting_minutes" && k == "code" {
 			return nil, invalid("会议编号由服务器生成")
 		}
@@ -478,6 +495,9 @@ func defaults(kind string) map[string]any {
 	m["updated_at"] = m["created_at"]
 	m["version"] = 1
 	switch kind {
+	case "requirements":
+		m["status"] = "pending"
+		m["revision"] = 1
 	case "projects":
 		m["status"] = "active"
 	case "tasks":
@@ -531,13 +551,15 @@ func validate(tx *sql.Tx, kind string, m, before map[string]any) error {
 		}
 	}
 	for _, c := range columns[kind] {
-		if !oneOf(c, "progress", "priority", "estimate_hours", "version", "sort_order", "tags", "attachments", "minutes", "task_ids", "source_snapshot") && m[c] != nil {
+		if !oneOf(c, "progress", "priority", "estimate_hours", "version", "sort_order", "tags", "attachments", "minutes", "task_ids", "source_snapshot", "revision") && m[c] != nil {
 			if _, ok := m[c].(string); !ok {
 				return invalid("字段必须是文本: " + c)
 			}
 		}
 	}
 	switch kind {
+	case "requirements":
+		return validateRequirement(tx, m, before, m)
 	case "projects":
 		if !nonempty(m["name"]) {
 			return invalid("项目名称不能为空")
@@ -770,7 +792,7 @@ func insert(tx *sql.Tx, kind string, m map[string]any) error {
 	return dbErr(err)
 }
 func nextCode(tx *sql.Tx, kind string) string {
-	prefix := map[string]string{"projects": "PRJ", "records": "REC", "issues": "ISS", "meeting_minutes": "MTG"}[kind]
+	prefix := map[string]string{"projects": "PRJ", "records": "REC", "issues": "ISS", "meeting_minutes": "MTG", "requirements": "REQ"}[kind]
 	for i := 1; ; i++ {
 		code := fmt.Sprintf("%s-%s-%03d", prefix, time.Now().Format("20060102"), i)
 		var n int
@@ -804,6 +826,9 @@ func (s *Store) Create(kind string, input map[string]any) (map[string]any, error
 	return m, nil
 }
 func create(tx *sql.Tx, kind string, input map[string]any) (map[string]any, error) {
+	if kind == "plan_versions" {
+		return nil, immutablePlanError()
+	}
 	in, err := cleanInput(kind, input, true)
 	if err != nil {
 		return nil, err
@@ -827,7 +852,7 @@ func create(tx *sql.Tx, kind string, input map[string]any) (map[string]any, erro
 	if err = validate(tx, kind, m, nil); err != nil {
 		return nil, err
 	}
-	if kind == "projects" || kind == "records" || kind == "issues" || kind == "meeting_minutes" {
+	if kind == "projects" || kind == "records" || kind == "issues" || kind == "meeting_minutes" || kind == "requirements" {
 		if !nonempty(m["code"]) {
 			m["code"] = nextCode(tx, kind)
 		}
@@ -841,6 +866,11 @@ func create(tx *sql.Tx, kind string, input map[string]any) (map[string]any, erro
 	}
 	if err = insert(tx, kind, m); err != nil {
 		return nil, err
+	}
+	if kind == "requirements" {
+		if err = syncRequirementLinks(tx, m, nil, input); err != nil {
+			return nil, err
+		}
 	}
 	reminderHint := ""
 	if kind == "records" {
@@ -864,6 +894,11 @@ func create(tx *sql.Tx, kind string, input map[string]any) (map[string]any, erro
 	}
 	if kind == "records" {
 		m["reminder_parse_hint"] = reminderHint
+	}
+	if kind == "requirements" {
+		if err = appendRequirementRevision(tx, m); err != nil {
+			return nil, err
+		}
 	}
 	if err = searchSync(tx, kind, m); err != nil {
 		return nil, err
@@ -897,12 +932,23 @@ func (s *Store) Update(kind, id string, input map[string]any) (map[string]any, e
 	return m, nil
 }
 func update(tx *sql.Tx, kind, id string, input map[string]any) (map[string]any, error) {
+	if kind == "plan_versions" {
+		return nil, immutablePlanError()
+	}
+	if kind == "requirements" && !nonempty(input["change_note"]) {
+		return nil, invalid("修改需求必须明确填写变更说明")
+	}
 	before, err := get(tx, kind, id)
 	if err != nil {
 		return nil, err
 	}
 	if versionOf(input["version"]) != versionOf(before["version"]) {
 		return nil, fail("version_conflict", "内容已被修改，请刷新后重试", 409)
+	}
+	if kind == "requirements" {
+		if err = planningProjectWritable(tx, text(before["project_id"])); err != nil {
+			return nil, err
+		}
 	}
 	if kind == "meeting_minutes" {
 		if err = meetingProjectWritable(tx, text(before["project_id"])); err != nil {
@@ -972,8 +1018,14 @@ func update(tx *sql.Tx, kind, id string, input map[string]any) (map[string]any, 
 		_, explicit := in["source_snapshot"]
 		m["_source_snapshot_explicit"] = explicit
 	}
+	if kind == "requirements" && text(m["status"]) == "accepted" && text(before["status"]) != "accepted" && !nonempty(in["acceptance_note"]) {
+		return nil, invalid("每次验收必须明确填写本次验收说明")
+	}
 	if err = validate(tx, kind, m, before); err != nil {
 		return nil, err
+	}
+	if kind == "requirements" {
+		m["revision"] = versionOf(before["revision"]) + 1
 	}
 	m["version"] = versionOf(before["version"]) + 1
 	m["updated_at"] = now()
@@ -1023,6 +1075,11 @@ func update(tx *sql.Tx, kind, id string, input map[string]any) (map[string]any, 
 			return nil, err
 		}
 	}
+	if kind == "requirements" {
+		if err = syncRequirementLinks(tx, m, before, input); err != nil {
+			return nil, err
+		}
+	}
 	reminderHint := ""
 	if kind == "records" {
 		if reminderHint, err = syncRecordReminder(tx, m, input, false); err != nil {
@@ -1035,6 +1092,11 @@ func update(tx *sql.Tx, kind, id string, input map[string]any) (map[string]any, 
 	}
 	if kind == "records" {
 		m["reminder_parse_hint"] = reminderHint
+	}
+	if kind == "requirements" {
+		if err = appendRequirementRevision(tx, m); err != nil {
+			return nil, err
+		}
 	}
 	if err = searchSync(tx, kind, m); err != nil {
 		return nil, err

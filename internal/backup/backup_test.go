@@ -6,6 +6,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"projnote/internal/store"
@@ -280,5 +281,112 @@ func TestSchemaSevenSnapshotRequiresCompleteMeetingTable(t *testing.T) {
 				t.Fatal("incomplete schema7 meeting backup accepted")
 			}
 		})
+	}
+}
+
+func TestSchemaEightRequiresVersionTablesColumnsAndImmutableProtection(t *testing.T) {
+	for _, corruption := range []string{"DROP TABLE plan_versions", "DROP TABLE requirement_task_links", "ALTER TABLE requirement_revisions DROP COLUMN hash", "DROP TRIGGER plan_versions_immutable_update"} {
+		t.Run(corruption, func(t *testing.T) {
+			root := t.TempDir()
+			st, err := store.Open(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			if _, err = st.DB.Exec(corruption); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := Create(root, st.DB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stage, _, err := Extract(filepath.Join(root, "backups", snapshot.Name), t.TempDir()); err == nil {
+				os.RemoveAll(stage)
+				t.Fatal("incomplete schema8 backup accepted")
+			}
+		})
+	}
+}
+
+func TestSchemaEightRejectsCorruptedVersionSnapshotDespiteValidOuterManifest(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p, err := st.Create("projects", map[string]any{"name": "历史版本项目"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, err := st.CreatePlanVersion(p["id"].(string), map[string]any{"project_version": p["version"], "name": "独立完整计划"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var protection string
+	if err = st.DB.QueryRow("SELECT sql FROM sqlite_master WHERE type='trigger' AND name='plan_versions_immutable_update'").Scan(&protection); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.DB.Exec("DROP TRIGGER plan_versions_immutable_update"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.DB.Exec("UPDATE plan_versions SET hash=? WHERE id=?", strings.Repeat("0", 64), version["id"]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.DB.Exec(protection); err != nil {
+		t.Fatal(err)
+	}
+	archive, err := Create(root, st.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stage, _, err := Extract(filepath.Join(root, "backups", archive.Name), t.TempDir()); err == nil {
+		os.RemoveAll(stage)
+		t.Fatal("corrupted saved plan accepted after outer hash recomputation")
+	}
+}
+
+func TestSchemaEightRejectsRevisionGapEvenWhenCountMatchesCurrent(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	p, err := st.Create("projects", map[string]any{"name": "历史连续性项目"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req, err := st.Create("requirements", map[string]any{"project_id": p["id"], "title": "版本连续性", "description": "保留所有历史", "acceptance_criteria": "修订从一开始连续"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, title := range []string{"第二版", "第三版"} {
+		req, err = st.Update("requirements", req["id"].(string), map[string]any{"version": req["version"], "title": title, "change_note": "修订测试"})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	var protection string
+	if err = st.DB.QueryRow("SELECT sql FROM sqlite_master WHERE name='requirement_revisions_immutable_update'").Scan(&protection); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.DB.Exec("DROP TRIGGER requirement_revisions_immutable_update"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.DB.Exec("UPDATE requirement_revisions SET revision=4 WHERE requirement_id=? AND revision=2", req["id"]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = st.DB.Exec(protection); err != nil {
+		t.Fatal(err)
+	}
+	// The old check accepted {1,3,4}: three rows and the current revision 3 exist.
+	archive, err := Create(root, st.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stage, _, err := Extract(filepath.Join(root, "backups", archive.Name), t.TempDir()); err == nil {
+		os.RemoveAll(stage)
+		t.Fatal("non-contiguous requirement revisions accepted")
 	}
 }

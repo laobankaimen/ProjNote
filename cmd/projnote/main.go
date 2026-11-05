@@ -29,7 +29,7 @@ import (
 	"projnote/internal/store"
 )
 
-var version = "0.3.5-dev"
+var version = "0.4.0-dev"
 
 type runtimeInfo struct {
 	URL      string `json:"url"`
@@ -38,8 +38,13 @@ type runtimeInfo struct {
 }
 
 func main() {
-	if err := run(); err != nil {
-		fmt.Fprintln(os.Stderr, "ProjNote:", err)
+	err := prepareDesktopProcess()
+	if err == nil {
+		err = run()
+	}
+	desktopProcessDone(err)
+	if err != nil {
+		reportStartupFailure(err)
 		os.Exit(1)
 	}
 }
@@ -60,7 +65,8 @@ func defaultDataDir() string {
 	}
 	return "data"
 }
-func run() error {
+func run() (runErr error) {
+	flag.CommandLine.Init(os.Args[0], flag.ContinueOnError)
 	dataFlag := flag.String("data-dir", "", "数据目录（默认程序同级 data，可写性不足时使用用户配置目录）")
 	port := flag.Int("port", 18600, "首选本地端口，冲突时顺延最多 99 个端口")
 	compact := flag.Bool("compact", false, "直接展开原生桌面便签（正常启动已默认显示贴边入口）")
@@ -70,8 +76,17 @@ func run() error {
 	restore := flag.String("restore", "", "停止服务后，从完整 ZIP 恢复；自动创建当前数据回滚备份")
 	verify := flag.String("verify-backup", "", "校验完整 ZIP 的全部文件哈希与数据库，不覆盖数据")
 	relocate := flag.String("relocate", "", "停服后复制数据到新的空目录，原目录保留")
+	foreground := flag.Bool("foreground", false, "在前台运行服务（Linux 调试和终端运维）")
 	stop := flag.Bool("stop", false, "结束此数据目录正在运行的服务")
-	flag.Parse()
+	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+	if flag.NArg() != 0 {
+		return errors.New("未知参数：" + flag.Arg(0))
+	}
 	if err := validateStartupFlags(*compact, *browser, *noBrowser, *noDesktop); err != nil {
 		return err
 	}
@@ -103,8 +118,13 @@ func run() error {
 	if err = os.MkdirAll(dataDir, 0700); err != nil {
 		return err
 	}
+	startupLogRoot = dataDir
 	if *stop {
 		return stopExisting(dataDir)
+	}
+	background := desktopBackgroundOptions{foreground: *foreground, noBrowser: *noBrowser, noDesktop: *noDesktop, maintenance: *restore != "" || *relocate != "" || *verify != ""}
+	if handled, err := startDesktopBackground(dataDir, background); handled || err != nil {
+		return err
 	}
 	lock, err := platform.AcquireLock(filepath.Join(dataDir, "app.lock"))
 	if err != nil {
@@ -115,6 +135,11 @@ func run() error {
 		if e != nil {
 			return fmt.Errorf("无法锁定数据目录，且未发现可验证的运行实例: %w", err)
 		}
+		defer func() {
+			if runErr == nil {
+				desktopServiceReady(info.URL)
+			}
+		}()
 		fmt.Println("ProjNote 已在运行：", info.URL)
 		if *compact {
 			return requestExistingCompact(info.URL)
@@ -123,6 +148,7 @@ func run() error {
 		if startup.desktop && existingDesktopEnabled(info.URL) {
 			if e = requestExistingEntry(info.URL); e != nil {
 				fmt.Println("桌面入口未启动：", e)
+				presentStartupFailure("桌面入口未启动：" + e.Error() + "\n服务仍在运行：" + info.URL)
 			}
 		}
 		if startup.browser {
@@ -276,15 +302,18 @@ func run() error {
 		if e := ensureCompact(startup.expand); e != nil {
 			slog.Warn("compact unavailable", "error", e)
 			fmt.Println("桌面入口未启动：", e)
+			presentStartupFailure("桌面入口未启动：" + e.Error() + "\n服务仍在运行：" + info.URL + "\n诊断日志：" + logDir)
 		}
 	}
 	if startup.browser {
 		if e := platform.OpenBrowser(info.URL); e != nil {
 			slog.Warn("browser unavailable", "error", e)
 			fmt.Println("请手动打开上面的本机地址。")
+			presentStartupFailure("工作台浏览器未打开：" + e.Error() + "\n服务仍在运行，请手动打开：" + info.URL)
 		}
 	}
 
+	desktopServiceReady(info.URL)
 	err = srv.Serve(listener)
 	cancel()
 	wg.Wait()

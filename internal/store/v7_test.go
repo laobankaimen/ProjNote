@@ -59,7 +59,7 @@ func TestV7MigrationFromV6PreservesDraftMonthFrozenSourceAndAudit(t *testing.T) 
 	defer s.Close()
 	var version, count int
 	s.DB.QueryRow("PRAGMA user_version").Scan(&version)
-	if version != 7 {
+	if version != SchemaVersion {
 		t.Fatal("schema7 not applied", version)
 	}
 	if got := getNow(t, s, "worklogs", text(log["id"])); !reflect.DeepEqual(got, log) {

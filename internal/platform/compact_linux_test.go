@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -416,6 +417,13 @@ func TestCompactNativeSingleArrowCloseReopenNoDrag(t *testing.T) {
 	if os.Getenv("PROJNOTE_TEST_COMPACT_NATIVE") != "1" {
 		t.Skip("native desktop check requires explicit opt-in")
 	}
+	browserDir := t.TempDir()
+	browserLog := filepath.Join(browserDir, "browser.log")
+	if err := os.WriteFile(filepath.Join(browserDir, "xdg-open"), []byte("#!/bin/sh\nprintf '%s\\n' \"$1\" >> \"$PROJNOTE_TEST_BROWSER_LOG\"\n"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", browserDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	t.Setenv("PROJNOTE_TEST_BROWSER_LOG", browserLog)
 	mock, server := newCompactMockService(t)
 	mock.mu.Lock()
 	for i := 0; i < 4; i++ {
@@ -504,6 +512,21 @@ func TestCompactNativeSingleArrowCloseReopenNoDrag(t *testing.T) {
 	mock.mu.Lock()
 	loadsBefore, versionBefore := mock.draftLoads, mock.draft.Version
 	mock.mu.Unlock()
+	if _, err := os.Stat(browserLog); !os.IsNotExist(err) {
+		t.Fatal("browser opened without an explicit workbench click", err)
+	}
+	if state["full_text"] != "打开完整工作台" {
+		t.Fatal("direct workbench button missing", state)
+	}
+	command("full_button", nil)
+	state = wait(func(s map[string]any) bool {
+		output, err := os.ReadFile(browserLog)
+		return err == nil && strings.TrimSpace(string(output)) == server.URL && opened(s)
+	})
+	if state["content"] != "关闭箭头循环不丢正文" {
+		t.Fatal("workbench click lost draft", state)
+	}
+
 	for cycle := 0; cycle < 3; cycle++ {
 		// The close and open paths invoke real owned Gtk.Button controls; the
 		// pointer path delivers GDK press/release events only to our own button.
