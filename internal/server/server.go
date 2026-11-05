@@ -14,6 +14,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"projnote/internal/backup"
@@ -29,6 +30,8 @@ type Server struct {
 	Version      string
 	RuntimeToken string
 	Shutdown     func()
+	Backup       *backup.Manager
+	backupOnce   sync.Once
 }
 
 func (s *Server) Handler() http.Handler {
@@ -64,10 +67,6 @@ func (s *Server) Handler() http.Handler {
 		}
 		if r.Method != "GET" && r.Method != "HEAD" && r.Method != "OPTIONS" && r.Header.Get("X-ProjNote-Request") != "1" {
 			writeError(w, 403, "request_header_required", "缺少本地请求标识")
-			return
-		}
-		if r.Method == "DELETE" {
-			writeError(w, 405, "deletion_unavailable", "首版尚未提供回收站，暂不开放删除")
 			return
 		}
 		if strings.HasPrefix(r.URL.Path, "/api/") {
@@ -120,12 +119,39 @@ func body(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	p := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/"), "/"), "/")
 	kind := p[0]
+	if len(p) == 3 && p[2] == "history" && r.Method == "GET" {
+		s.history(w, r, kind, p[1])
+		return
+	}
+	if kind == "projects" && len(p) == 3 && p[2] == "tree" && r.Method == "GET" {
+		result, err := s.Store.TaskTree(p[1])
+		if err != nil {
+			handleErr(w, err)
+		} else {
+			jsonResult(w, 200, result)
+		}
+		return
+	}
 	switch kind {
 	case "health":
 		if r.Method != "GET" {
 			break
 		}
 		jsonResult(w, 200, map[string]any{"version": s.Version, "status": "ok", "instance": s.RuntimeToken})
+		return
+	case "tags":
+		if len(p) != 1 || r.Method != "GET" {
+			break
+		}
+		items, err := s.Store.Tags(r.URL.Query().Get("q"))
+		if err != nil {
+			handleErr(w, err)
+		} else {
+			jsonResult(w, 200, map[string]any{"items": items, "total": len(items)})
+		}
+		return
+	case "time-entries", "reminders":
+		s.productivity(w, r, p)
 		return
 	case "today":
 		if r.Method != "GET" {
@@ -146,12 +172,11 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			writeError(w, 400, "query_too_long", "搜索词不能超过 200 字")
 			return
 		}
-		items, err := s.Store.Search(r.URL.Query().Get("q"))
+		result, err := s.Store.SearchPage(filtersOf(r))
 		if err != nil {
 			handleErr(w, err)
 		} else {
-			start, end := pageBounds(r, len(items), 30)
-			jsonResult(w, 200, map[string]any{"items": items[start:end], "total": len(items), "capped": len(items) == 500})
+			jsonResult(w, 200, result)
 		}
 		return
 	case "settings":
@@ -202,7 +227,38 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	case "attachments":
 		s.attachments(w, r, p)
 		return
+	case "trash":
+		if len(p) == 1 && r.Method == "GET" {
+			result, err := s.Store.ListTrash(filtersOf(r))
+			if err != nil {
+				handleErr(w, err)
+			} else {
+				jsonResult(w, 200, result)
+			}
+			return
+		}
+		if len(p) == 4 && p[3] == "restore" && r.Method == "POST" {
+			input, ok := body(w, r)
+			if !ok {
+				return
+			}
+			result, err := s.Store.RestoreTrash(p[1], p[2], input)
+			if err != nil {
+				handleErr(w, err)
+			} else {
+				jsonResult(w, 200, result)
+			}
+			return
+		}
 	case "system":
+		if len(p) == 2 && p[1] == "info" && r.Method == "GET" {
+			s.systemInfo(w, r)
+			return
+		}
+		if len(p) == 2 && p[1] == "maintenance-plan" && r.Method == "POST" {
+			s.maintenancePlan(w, r)
+			return
+		}
 		if len(p) == 2 && p[1] == "shutdown" && r.Method == "POST" {
 			jsonResult(w, 200, map[string]any{"message": "服务即将退出"})
 			if s.Shutdown != nil {
@@ -211,6 +267,30 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	case "projects", "tasks", "records", "issues", "worklogs":
+		if r.Method == "POST" && ((kind == "tasks" && len(p) == 2 && p[1] == "batch") || (kind == "tasks" && len(p) == 3 && (p[2] == "move" || p[2] == "reopen")) || (kind == "records" && len(p) == 2 && p[1] == "batch-classify")) {
+			input, ok := body(w, r)
+			if !ok {
+				return
+			}
+			var result map[string]any
+			var err error
+			switch {
+			case kind == "records":
+				result, err = s.Store.ClassifyRecords(input)
+			case len(p) == 2:
+				result, err = s.Store.BatchTasks(input)
+			case p[2] == "move":
+				result, err = s.Store.MoveTask(p[1], input)
+			default:
+				result, err = s.Store.ReopenTask(p[1], input)
+			}
+			if err != nil {
+				handleErr(w, err)
+			} else {
+				jsonResult(w, 200, result)
+			}
+			return
+		}
 		if kind == "worklogs" && len(p) == 2 && p[1] == "generate" && r.Method == "POST" {
 			input, ok := body(w, r)
 			if !ok {
@@ -227,15 +307,11 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 		if len(p) == 1 {
 			switch r.Method {
 			case "GET":
-				filters := map[string]string{}
-				for k, vs := range r.URL.Query() {
-					filters[k] = vs[0]
-				}
-				items, total, err := s.Store.List(kind, filters)
+				result, err := s.Store.ListPage(kind, filtersOf(r))
 				if err != nil {
 					handleErr(w, err)
 				} else {
-					jsonResult(w, 200, map[string]any{"items": items, "total": total})
+					jsonResult(w, 200, result)
 				}
 				return
 			case "POST":
@@ -282,10 +358,22 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 				return
 			case "DELETE":
 				version, _ := strconv.Atoi(r.URL.Query().Get("version"))
-				if err := s.Store.Delete(kind, p[1], version); err != nil {
+				input := map[string]any{"version": version}
+				if r.URL.Query().Get("cascade") == "true" {
+					input["cascade"] = true
+				}
+				if r.ContentLength > 0 {
+					var ok bool
+					input, ok = body(w, r)
+					if !ok {
+						return
+					}
+				}
+				result, err := s.Store.SoftDelete(kind, p[1], input)
+				if err != nil {
 					handleErr(w, err)
 				} else {
-					jsonResult(w, 200, map[string]any{"deleted": true})
+					jsonResult(w, 200, result)
 				}
 				return
 			}
@@ -383,17 +471,28 @@ func (s *Server) backups(w http.ResponseWriter, r *http.Request, p []string) {
 		}
 		return
 	}
-	if len(p) == 1 && r.Method == "POST" {
-		s.Store.Mu.Lock()
-		info, err := backup.Create(s.DataDir, s.Store.DB)
-		s.Store.Mu.Unlock()
+	if len(p) == 2 && p[1] == "prune" && r.Method == "POST" {
+		input, ok := body(w, r)
+		if !ok {
+			return
+		}
+		if input["confirm"] != true {
+			writeError(w, 400, "confirmation_required", "请确认按已保存策略永久清理旧备份")
+			return
+		}
+		result, err := s.backupManager().Prune()
 		if err != nil {
 			handleErr(w, err)
 		} else {
-			if e := s.Store.RecordEvent("backup", "system", info.Name, map[string]any{"size": info.Size, "automatic": false}); e != nil {
-				handleErr(w, e)
-				return
-			}
+			jsonResult(w, 200, result)
+		}
+		return
+	}
+	if len(p) == 1 && r.Method == "POST" {
+		info, err := s.backupManager().Create("manual", false)
+		if err != nil {
+			handleErr(w, err)
+		} else {
 			jsonResult(w, 201, info)
 		}
 		return
@@ -471,4 +570,14 @@ func pageBounds(r *http.Request, total, defaultLimit int) (int, int) {
 		end = total
 	}
 	return offset, end
+}
+
+func filtersOf(r *http.Request) map[string]string {
+	filters := map[string]string{}
+	for key, values := range r.URL.Query() {
+		if len(values) > 0 {
+			filters[key] = values[0]
+		}
+	}
+	return filters
 }

@@ -10,7 +10,7 @@ import (
 	"unicode/utf8"
 )
 
-func parseQuick(tx *sql.Tx, m map[string]any) error {
+func parseQuick(tx *sql.Tx, m map[string]any, allowProject bool) error {
 	content := text(m["content"])
 	words := strings.Fields(content)
 	tags := []any{}
@@ -37,13 +37,13 @@ func parseQuick(tx *sql.Tx, m map[string]any) error {
 			}
 		}
 	}
-	if !nonempty(m["project_id"]) {
+	if allowProject && !nonempty(m["project_id"]) {
 		for _, word := range words {
 			if !strings.HasPrefix(word, "@") || len(word) < 2 {
 				continue
 			}
 			name := strings.Trim(strings.TrimPrefix(word, "@"), "，。；,;!！")
-			rows, err := tx.Query("SELECT id FROM projects WHERE name=? OR code=?", name, name)
+			rows, err := tx.Query("SELECT id FROM projects WHERE deleted_at='' AND (name=? OR code=?)", name, name)
 			if err != nil {
 				return err
 			}
@@ -72,7 +72,7 @@ type taskNode struct {
 }
 
 func recalculate(tx *sql.Tx, projectID, changedID string) error {
-	rows, err := tx.Query("SELECT * FROM tasks WHERE project_id=? ORDER BY sort_order,id", projectID)
+	rows, err := tx.Query("SELECT * FROM tasks WHERE project_id=? AND deleted_at='' ORDER BY sort_order,id", projectID)
 	if err != nil {
 		return err
 	}
@@ -271,14 +271,11 @@ func (s *Store) SetSettings(input map[string]any) error {
 		return err
 	}
 	for k, v := range input {
-		if k != "operator" {
-			return invalid("未知设置: " + k)
+		str, e := settingValue(k, v)
+		if e != nil {
+			return e
 		}
-		str, ok := v.(string)
-		if !ok || strings.TrimSpace(str) == "" || len([]rune(str)) > 80 {
-			return invalid("操作者必须是 1 至 80 个字符")
-		}
-		if _, err = tx.Exec("INSERT INTO settings(key,value)VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", k, strings.TrimSpace(str)); err != nil {
+		if _, err = tx.Exec("INSERT INTO settings(key,value)VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value", k, str); err != nil {
 			return err
 		}
 	}
@@ -322,7 +319,7 @@ func (s *Store) Today() (map[string]any, error) {
 	end := start.AddDate(0, 0, 1)
 	boundaryStart, boundaryEnd := start.UTC().Format(time.RFC3339Nano), end.UTC().Format(time.RFC3339Nano)
 	stats := map[string]any{}
-	queries := map[string]string{"projects": "SELECT count(*) FROM projects WHERE status IN('active','paused')", "tasks_open": "SELECT count(*) FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.status IN('todo','doing') AND p.status!='archived'", "tasks_done": "SELECT count(*) FROM tasks WHERE status='done'", "issues_open": "SELECT count(*) FROM issues i JOIN projects p ON p.id=i.project_id WHERE i.status NOT IN('closed','rejected') AND p.status!='archived'", "records_today": "SELECT count(*) FROM records WHERE julianday(occurred_at)>=julianday(?) AND julianday(occurred_at)<julianday(?)", "unclassified": "SELECT count(*) FROM records WHERE project_id IS NULL"}
+	queries := map[string]string{"projects": "SELECT count(*) FROM projects WHERE deleted_at='' AND status IN('active','paused')", "tasks_open": "SELECT count(*) FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.deleted_at='' AND p.deleted_at='' AND t.status IN('todo','doing') AND p.status!='archived'", "tasks_done": "SELECT count(*) FROM tasks WHERE deleted_at='' AND status='done'", "issues_open": "SELECT count(*) FROM issues i JOIN projects p ON p.id=i.project_id WHERE i.deleted_at='' AND p.deleted_at='' AND i.status NOT IN('closed','rejected') AND p.status!='archived'", "records_today": "SELECT count(*) FROM records WHERE deleted_at='' AND julianday(occurred_at)>=julianday(?) AND julianday(occurred_at)<julianday(?)", "unclassified": "SELECT count(*) FROM records WHERE deleted_at='' AND project_id IS NULL"}
 	for k, q := range queries {
 		var count int
 		var err error
@@ -336,7 +333,7 @@ func (s *Store) Today() (map[string]any, error) {
 		}
 		stats[k] = count
 	}
-	rows, err := s.DB.Query("SELECT t.* FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.status IN('todo','doing') AND p.status!='archived' AND (t.plan_start='' OR t.plan_start<=?) ORDER BY CASE WHEN t.plan_end='' THEN 1 ELSE 0 END,t.plan_end,t.priority,t.created_at LIMIT 100", d)
+	rows, err := s.DB.Query("SELECT t.* FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.deleted_at='' AND p.deleted_at='' AND t.status IN('todo','doing') AND p.status!='archived' AND (t.plan_start='' OR t.plan_start<=?) ORDER BY CASE WHEN t.plan_end='' THEN 1 ELSE 0 END,t.plan_end,t.priority,t.created_at LIMIT 100", d)
 	if err != nil {
 		return nil, err
 	}
@@ -347,7 +344,10 @@ func (s *Store) Today() (map[string]any, error) {
 	for _, t := range tasks {
 		normalize("tasks", t)
 	}
-	rows, err = s.DB.Query("SELECT * FROM records WHERE julianday(occurred_at)>=julianday(?) AND julianday(occurred_at)<julianday(?) ORDER BY occurred_at DESC LIMIT 100", boundaryStart, boundaryEnd)
+	if err = attachTaskActuals(s.DB, tasks, false); err != nil {
+		return nil, err
+	}
+	rows, err = s.DB.Query("SELECT * FROM records WHERE deleted_at='' AND julianday(occurred_at)>=julianday(?) AND julianday(occurred_at)<julianday(?) ORDER BY occurred_at DESC LIMIT 100", boundaryStart, boundaryEnd)
 	if err != nil {
 		return nil, err
 	}
@@ -358,7 +358,17 @@ func (s *Store) Today() (map[string]any, error) {
 	for _, r := range records {
 		normalize("records", r)
 	}
-	return map[string]any{"date": d, "tasks": tasks, "records": records, "stats": stats}, nil
+	reminders, err := reminderList(s.DB, map[string]string{"status": "pending", "due_to": boundaryEnd, "limit": "500", "actionable": "1"})
+	if err != nil {
+		return nil, err
+	}
+	var minutes int
+	if err = s.DB.QueryRow("SELECT COALESCE(sum(minutes),0) FROM time_entries WHERE deleted_at='' AND work_date=?", d).Scan(&minutes); err != nil {
+		return nil, err
+	}
+	stats["time_minutes_today"] = minutes
+	stats["reminders_due"] = reminders["total"]
+	return map[string]any{"date": d, "tasks": tasks, "records": records, "stats": stats, "reminders": reminders["items"], "time_minutes_today": minutes}, nil
 }
 func (s *Store) GenerateLog(input map[string]any) (map[string]any, error) {
 	s.Mu.RLock()
@@ -389,7 +399,7 @@ func (s *Store) GenerateLog(input map[string]any) (map[string]any, error) {
 	pid := text(input["project_id"])
 	if pid != "" {
 		var n int
-		if err := s.DB.QueryRow("SELECT count(*) FROM projects WHERE id=?", pid).Scan(&n); err != nil {
+		if err := s.DB.QueryRow("SELECT count(*) FROM projects WHERE id=? AND deleted_at=''", pid).Scan(&n); err != nil {
 			return nil, err
 		}
 		if n == 0 {
@@ -400,7 +410,7 @@ func (s *Store) GenerateLog(input map[string]any) (map[string]any, error) {
 	fmt.Fprintf(&b, "# %s · %s\n\n", label, date)
 	for _, section := range []struct{ kind, title, col string }{{"tasks", "任务进展", "updated_at"}, {"records", "现场记录", "occurred_at"}, {"issues", "问题跟踪", "updated_at"}} {
 		fmt.Fprintf(&b, "## %s\n\n", section.title)
-		where := " WHERE julianday(" + section.col + ")>=julianday(?) AND julianday(" + section.col + ")<julianday(?)"
+		where := " WHERE deleted_at='' AND julianday(" + section.col + ")>=julianday(?) AND julianday(" + section.col + ")<julianday(?)"
 		args := []any{start.UTC().Format(time.RFC3339Nano), end.UTC().Format(time.RFC3339Nano)}
 		if pid != "" {
 			where += " AND project_id=?"
@@ -433,6 +443,23 @@ func (s *Store) GenerateLog(input map[string]any) (map[string]any, error) {
 		}
 		b.WriteString("\n")
 	}
+	filters := map[string]string{"date_from": date, "date_to": end.AddDate(0, 0, -1).Format("2006-01-02")}
+	if pid != "" {
+		filters["project_id"] = pid
+	}
+	summary, err := timeSummary(s.DB, filters)
+	if err != nil {
+		return nil, err
+	}
+	fmt.Fprintf(&b, "## 工时记录\n\n- 合计 %d 分钟（%.2f 小时）\n", int(num(summary["total_minutes"])), num(summary["total_minutes"])/60)
+	for _, day := range summary["by_day"].([]map[string]any) {
+		warning := ""
+		if day["over_eight_hours"] == true {
+			warning = "，超过 8 小时，请核对"
+		}
+		fmt.Fprintf(&b, "- %s：%d 分钟%s\n", text(day["date"]), int(num(day["minutes"])), warning)
+	}
+	b.WriteString("\n")
 	b.WriteString("## 后续计划\n\n- 待补充\n")
 	return map[string]any{"content": b.String(), "log_date": date, "period_type": period, "project_id": pid}, nil
 }

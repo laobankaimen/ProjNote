@@ -169,3 +169,25 @@ func TestInterruptedRestoreBlocksOpeningEmptyDatabase(t *testing.T) {
 		t.Fatal("new restore overwrote interrupted state")
 	}
 }
+
+func TestSchemaThreeSnapshotMustIncludeNewDomainTables(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A valid ZIP and SQLite integrity check do not prove that a database claiming
+	// schema 3 actually includes the migration's required tables.
+	if _, err = st.DB.Exec("DROP TABLE time_entries; DROP TABLE reminders;"); err != nil {
+		t.Fatal(err)
+	}
+	info, err := Create(root, st.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_ = st.Close()
+	if stage, _, err := Extract(filepath.Join(root, "backups", info.Name), t.TempDir()); err == nil {
+		os.RemoveAll(stage)
+		t.Fatal("accepted incomplete schema3 snapshot")
+	}
+}

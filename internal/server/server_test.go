@@ -8,6 +8,8 @@ import (
 	"io"
 	"mime/multipart"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -97,8 +99,8 @@ func TestImageUploadOriginalAndValidation(t *testing.T) {
 	if bad.Code != 400 {
 		t.Fatalf("accepted invalid attachment: %d %s", bad.Code, bad.Body.String())
 	}
-	if got := call(s, "DELETE", "/api/records/anything", "", map[string]string{"X-ProjNote-Request": "1"}); got.Code != 405 {
-		t.Fatal("unsafe delete exposed")
+	if got := call(s, "DELETE", "/api/records/anything", "", map[string]string{"X-ProjNote-Request": "1"}); got.Code != 404 {
+		t.Fatal("unknown delete must not succeed")
 	}
 }
 func TestMalformedJSONAndMissingStaticDoNotFallback(t *testing.T) {
@@ -115,5 +117,63 @@ func TestMalformedJSONAndMissingStaticDoNotFallback(t *testing.T) {
 		if w.Code != 404 {
 			t.Fatalf("missing route returned %d: %s", w.Code, b)
 		}
+	}
+}
+
+func decodeData(t *testing.T, w *httptest.ResponseRecorder) map[string]any {
+	t.Helper()
+	if w.Code < 200 || w.Code > 299 {
+		t.Fatalf("HTTP %d: %s", w.Code, w.Body.String())
+	}
+	var response struct {
+		Data map[string]any `json:"data"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &response); err != nil {
+		t.Fatal(err)
+	}
+	return response.Data
+}
+func TestRecycleRestoreAndSystemPlanBoundaries(t *testing.T) {
+	s := testServer(t)
+	headers := map[string]string{"Content-Type": "application/json", "X-ProjNote-Request": "1"}
+	created := decodeData(t, call(s, "POST", "/api/records", `{"content":"可恢复的现场记录"}`, headers))
+	id := created["id"].(string)
+	deleted := decodeData(t, call(s, "DELETE", "/api/records/"+id+"?version=1", "", headers))
+	if deleted["deleted"] != true {
+		t.Fatal("not recycled")
+	}
+	if got := call(s, "GET", "/api/records/"+id, "", nil); got.Code != 404 {
+		t.Fatal("recycled record still visible")
+	}
+	trash := decodeData(t, call(s, "GET", "/api/trash", "", nil))
+	items := trash["items"].([]any)
+	if len(items) != 1 {
+		t.Fatal("missing trash item")
+	}
+	item := items[0].(map[string]any)
+	payload, _ := json.Marshal(map[string]any{"version": item["version"]})
+	decodeData(t, call(s, "POST", "/api/trash/records/"+id+"/restore", string(payload), headers))
+	decodeData(t, call(s, "GET", "/api/records/"+id, "", nil))
+	for _, target := range []string{"relative", s.DataDir, s.DataDir + "/inside"} {
+		payload, _ = json.Marshal(map[string]any{"action": "relocate", "target_dir": target})
+		if w := call(s, "POST", "/api/system/maintenance-plan", string(payload), headers); w.Code != 400 {
+			t.Fatalf("accepted invalid target: %s %d", target, w.Code)
+		}
+	}
+	target := filepath.Join(t.TempDir(), "新目录 空格")
+	payload, _ = json.Marshal(map[string]any{"action": "relocate", "target_dir": target})
+	plan := decodeData(t, call(s, "POST", "/api/system/maintenance-plan", string(payload), headers))
+	if len(plan["commands"].([]any)) != 3 {
+		t.Fatal("incomplete maintenance commands")
+	}
+	if _, err := os.Stat(target); !os.IsNotExist(err) {
+		t.Fatal("plan unexpectedly created target")
+	}
+	info := decodeData(t, call(s, "GET", "/api/system/info", "", nil))
+	if info["gjb_level"] != "2" || info["dataset_id"] == "" {
+		t.Fatal("missing confirmed level or stable dataset")
+	}
+	if w := call(s, "POST", "/api/backups/prune", `{}`, headers); w.Code != 400 {
+		t.Fatal("cleanup missing explicit confirmation")
 	}
 }

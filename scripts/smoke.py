@@ -53,7 +53,7 @@ def main():
                 slow = socket.create_connection((endpoint.hostname, endpoint.port))
                 slow.sendall((f"POST /api/projects HTTP/1.1\r\nHost: {endpoint.netloc}\r\nContent-Type: application/json\r\nX-ProjNote-Request: 1\r\nContent-Length: {len(payload)}\r\nConnection: close\r\n\r\n").encode() + payload[:1])
                 time.sleep(.1)
-            subprocess.run([binary, "--data-dir", str(root), "--stop"], check=True, capture_output=True, text=True)
+            stopper = subprocess.Popen([binary, "--data-dir", str(root), "--stop"], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True)
             if slow is not None:
                 time.sleep(.4)
                 assert p.poll() is None, "shutdown did not drain active request"
@@ -67,6 +67,8 @@ def main():
                     response.extend(chunk)
                 slow.close()
                 assert b"201 Created" in response, response
+            stop_output, _ = stopper.communicate(timeout=25)
+            assert stopper.returncode == 0, stop_output
             out, _ = p.communicate(timeout=20)
             assert p.returncode == 0, out
 

@@ -19,6 +19,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+const SchemaVersion = 3
+
 type AppError struct {
 	Code    string
 	Message string
@@ -40,11 +42,13 @@ type queryer interface {
 }
 
 var columns = map[string][]string{
-	"projects": strings.Fields("id code name customer phase manager start_date end_date status description created_at updated_at version"),
-	"tasks":    strings.Fields("id project_id parent_id wbs_code name assignee plan_start plan_end progress status priority estimate_hours description actual_start actual_end created_at updated_at version sort_order"),
-	"records":  strings.Fields("id code project_id type title content location occurred_at tags attachments created_at updated_at version"),
-	"issues":   strings.Fields("id code project_id title description severity source status owner due_at root_cause solution verify_result rejection_reason closed_at created_at updated_at version"),
-	"worklogs": strings.Fields("id project_id period_type log_date content created_at updated_at version"),
+	"projects":     strings.Fields("id code name customer phase manager start_date end_date status description created_at updated_at version deleted_at"),
+	"tasks":        strings.Fields("id project_id parent_id wbs_code name assignee plan_start plan_end progress status priority estimate_hours description actual_start actual_end created_at updated_at version sort_order deleted_at"),
+	"records":      strings.Fields("id code project_id type title content location occurred_at tags attachments created_at updated_at version deleted_at"),
+	"issues":       strings.Fields("id code project_id title description severity source status owner due_at root_cause solution verify_result rejection_reason closed_at created_at updated_at version deleted_at"),
+	"worklogs":     strings.Fields("id project_id period_type log_date content created_at updated_at version deleted_at"),
+	"time_entries": strings.Fields("id project_id task_id work_date minutes note created_at updated_at version deleted_at"),
+	"reminders":    strings.Fields("id title project_id record_id due_at created_at updated_at version done_at deleted_at"),
 }
 
 func Open(dataDir string) (*Store, error) {
@@ -80,10 +84,25 @@ func (s *Store) migrate() error {
 	if err = tx.QueryRow("PRAGMA user_version").Scan(&version); err != nil {
 		return err
 	}
-	if version > 1 {
+	if version > SchemaVersion {
 		return fmt.Errorf("数据库版本 %d 高于当前程序支持的版本", version)
 	}
+	if version == SchemaVersion {
+		return tx.Commit()
+	}
+	if version == 2 {
+		if err = migrateV3(tx); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
 	if version == 1 {
+		if err = migrateV2(tx); err != nil {
+			return err
+		}
+		if err = migrateV3(tx); err != nil {
+			return err
+		}
 		return tx.Commit()
 	}
 	schema := `
@@ -107,6 +126,12 @@ CREATE TRIGGER search_doc_au AFTER UPDATE ON search_doc BEGIN INSERT INTO search
 PRAGMA user_version=1;`
 	if _, err = tx.Exec(schema); err != nil {
 		return fmt.Errorf("初始化数据库: %w", err)
+	}
+	if err = migrateV2(tx); err != nil {
+		return err
+	}
+	if err = migrateV3(tx); err != nil {
+		return err
 	}
 	return tx.Commit()
 }
@@ -193,8 +218,12 @@ func normalize(kind string, m map[string]any) map[string]any {
 		}
 	}
 	if kind == "tasks" {
+		if v, ok := m["has_children"]; ok {
+			m["has_children"] = num(v) > 0
+		}
+	}
+	if kind == "tasks" {
 		m["overdue"] = nonempty(m["plan_end"]) && text(m["plan_end"]) < today() && !oneOf(m["status"], "done", "canceled")
-		delete(m, "sort_order")
 	}
 	return m
 }
@@ -223,7 +252,18 @@ func rawRows(rows *sql.Rows) ([]map[string]any, error) {
 	return out, rows.Err()
 }
 func get(q queryer, kind, id string) (map[string]any, error) {
-	rows, err := q.Query("SELECT * FROM "+kind+" WHERE id=?", id)
+	return getIncludingTrash(q, kind, id, false)
+}
+func getIncludingTrash(q queryer, kind, id string, trashed bool) (map[string]any, error) {
+	suffix := " AND deleted_at=''"
+	if trashed {
+		suffix = ""
+	}
+	selectColumns := "*"
+	if kind == "tasks" {
+		selectColumns += ",EXISTS(SELECT 1 FROM tasks child WHERE child.parent_id=tasks.id AND child.deleted_at='') AS has_children"
+	}
+	rows, err := q.Query("SELECT "+selectColumns+" FROM "+kind+" WHERE id=?"+suffix, id)
 	if err != nil {
 		return nil, err
 	}
@@ -235,6 +275,22 @@ func get(q queryer, kind, id string) (map[string]any, error) {
 		return nil, fail("not_found", "记录不存在", 404)
 	}
 	m := normalize(kind, all[0])
+	if kind == "records" {
+		rows, e := q.Query("SELECT id,due_at,version,done_at FROM reminders WHERE record_id=? AND deleted_at=''", id)
+		if e != nil {
+			return nil, e
+		}
+		reminders, e := rawRows(rows)
+		if e != nil {
+			return nil, e
+		}
+		m["reminder"] = nil
+		m["reminder_due_at"] = ""
+		if len(reminders) > 0 {
+			m["reminder"] = reminders[0]
+			m["reminder_due_at"] = reminders[0]["due_at"]
+		}
+	}
 	if kind == "issues" {
 		rows, err = q.Query("SELECT from_status,to_status,operator,created_at,detail FROM issue_history WHERE issue_id=? ORDER BY id", id)
 		if err != nil {
@@ -254,7 +310,16 @@ func (s *Store) Get(kind, id string) (map[string]any, error) {
 	}
 	s.Mu.RLock()
 	defer s.Mu.RUnlock()
-	return get(s.DB, kind, id)
+	m, err := get(s.DB, kind, id)
+	if err != nil {
+		return nil, err
+	}
+	if kind == "tasks" {
+		if err = attachTaskActuals(s.DB, []map[string]any{m}, false); err != nil {
+			return nil, err
+		}
+	}
+	return m, nil
 }
 func like(q string) string {
 	return "%" + strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(q) + "%"
@@ -265,62 +330,7 @@ func (s *Store) List(kind string, filters map[string]string) ([]map[string]any, 
 	}
 	s.Mu.RLock()
 	defer s.Mu.RUnlock()
-	where := " WHERE 1=1"
-	args := []any{}
-	for _, key := range []string{"project_id", "status", "type"} {
-		v, ok := filters[key]
-		if !ok {
-			continue
-		}
-		valid := false
-		for _, c := range columns[kind] {
-			if c == key {
-				valid = true
-			}
-		}
-		if !valid {
-			continue
-		}
-		if key == "project_id" && v == "" {
-			where += " AND project_id IS NULL"
-		} else {
-			where += " AND " + key + "=?"
-			args = append(args, v)
-		}
-	}
-	if q := strings.TrimSpace(filters["q"]); q != "" {
-		where += " AND id IN (SELECT entity_id FROM search_doc WHERE entity_type=? AND (title LIKE ? ESCAPE '\\' OR body LIKE ? ESCAPE '\\'))"
-		args = append(args, kind, like(q), like(q))
-	}
-	var total int
-	if err := s.DB.QueryRow("SELECT count(*) FROM "+kind+where, args...).Scan(&total); err != nil {
-		return nil, 0, err
-	}
-	limit := 100
-	if n, err := strconv.Atoi(filters["limit"]); err == nil && n > 0 {
-		limit = n
-	}
-	if limit > 500 {
-		limit = 500
-	}
-	offset, _ := strconv.Atoi(filters["offset"])
-	if offset < 0 {
-		offset = 0
-	}
-	order := "created_at DESC,id"
-	if kind == "tasks" {
-		order = "project_id,sort_order,id"
-	}
-	args = append(args, limit, offset)
-	rows, err := s.DB.Query("SELECT * FROM "+kind+where+" ORDER BY "+order+" LIMIT ? OFFSET ?", args...)
-	if err != nil {
-		return nil, 0, err
-	}
-	all, err := rawRows(rows)
-	for _, m := range all {
-		normalize(kind, m)
-	}
-	return all, total, err
+	return listRows(s.DB, kind, filters)
 }
 func operator(q queryer) string {
 	var v string
@@ -369,11 +379,14 @@ func searchSync(tx *sql.Tx, kind string, m map[string]any) error {
 	if title == "" {
 		title = text(m["title"])
 	}
+	if kind == "time_entries" {
+		title = text(m["work_date"]) + " 工时 " + text(m["minutes"]) + " 分钟"
+	}
 	if kind == "worklogs" {
 		title = text(m["log_date"]) + " " + text(m["period_type"])
 	}
 	body := []string{}
-	for _, k := range []string{"code", "description", "content", "location", "root_cause", "solution", "verify_result", "owner", "assignee", "customer", "manager"} {
+	for _, k := range []string{"code", "description", "content", "location", "root_cause", "solution", "verify_result", "owner", "assignee", "customer", "manager", "note", "work_date", "due_at"} {
 		if nonempty(m[k]) {
 			body = append(body, text(m[k]))
 		}
@@ -390,7 +403,7 @@ func projectWritable(q queryer, id string, newKind string) error {
 		return nil
 	}
 	var status string
-	if err := q.QueryRow("SELECT status FROM projects WHERE id=?", id).Scan(&status); err != nil {
+	if err := q.QueryRow("SELECT status FROM projects WHERE id=? AND deleted_at=''", id).Scan(&status); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return invalid("关联项目不存在")
 		}
@@ -411,16 +424,20 @@ func cleanInput(kind string, input map[string]any, creating bool) (map[string]an
 		allowed[c] = true
 	}
 	for k, v := range input {
+		if kind == "records" && k == "reminder_due_at" {
+			out[k] = v
+			continue
+		}
 		if k == "version" && !creating {
 			continue
 		}
 		if !allowed[k] {
 			return nil, invalid("未知字段: " + k)
 		}
-		if oneOf(k, "id", "created_at", "updated_at", "wbs_code", "sort_order", "closed_at") || k == "version" {
+		if oneOf(k, "id", "created_at", "updated_at", "wbs_code", "sort_order", "closed_at", "deleted_at", "done_at") || k == "version" {
 			return nil, invalid("字段由服务器生成: " + k)
 		}
-		if v == nil && !oneOf(k, "project_id", "parent_id") {
+		if v == nil && !oneOf(k, "project_id", "parent_id", "task_id", "record_id") {
 			return nil, invalid("字段不能为空值: " + k)
 		}
 		out[k] = v
@@ -454,6 +471,11 @@ func defaults(kind string) map[string]any {
 	case "issues":
 		m["status"] = "open"
 		m["severity"] = "minor"
+	case "time_entries":
+		m["work_date"] = today()
+		m["minutes"] = 0
+	case "reminders":
+		m["due_at"] = ""
 	case "worklogs":
 		m["period_type"] = "day"
 		m["log_date"] = today()
@@ -479,7 +501,7 @@ func validate(tx *sql.Tx, kind string, m, before map[string]any) error {
 		}
 	}
 	for _, c := range columns[kind] {
-		if !oneOf(c, "progress", "priority", "estimate_hours", "version", "sort_order", "tags", "attachments") && m[c] != nil {
+		if !oneOf(c, "progress", "priority", "estimate_hours", "version", "sort_order", "tags", "attachments", "minutes") && m[c] != nil {
 			if _, ok := m[c].(string); !ok {
 				return invalid("字段必须是文本: " + c)
 			}
@@ -535,8 +557,14 @@ func validate(tx *sql.Tx, kind string, m, before map[string]any) error {
 			if text(p["project_id"]) != text(m["project_id"]) {
 				return invalid("父子任务必须属于同一项目")
 			}
-			if oneOf(p["status"], "done", "canceled") {
-				return invalid("已结束任务不能添加子任务")
+			if oneOf(p["status"], "done", "canceled") && (before == nil || text(before["parent_id"]) != parent) {
+				var children int
+				if err = tx.QueryRow("SELECT count(*) FROM tasks WHERE parent_id=? AND deleted_at=''", parent).Scan(&children); err != nil {
+					return err
+				}
+				if children == 0 {
+					return invalid("已结束叶子任务不能添加子任务，请先显式重开")
+				}
 			}
 			seen := map[string]bool{text(m["id"]): true}
 			for parent != "" {
@@ -553,7 +581,7 @@ func validate(tx *sql.Tx, kind string, m, before map[string]any) error {
 		}
 		if before != nil && text(m["project_id"]) != text(before["project_id"]) {
 			var n int
-			if err := tx.QueryRow("SELECT count(*) FROM tasks WHERE parent_id=?", m["id"]).Scan(&n); err != nil {
+			if err := tx.QueryRow("SELECT count(*) FROM tasks WHERE parent_id=? AND deleted_at=''", m["id"]).Scan(&n); err != nil {
 				return err
 			}
 			if n > 0 {
@@ -633,6 +661,10 @@ func validate(tx *sql.Tx, kind string, m, before map[string]any) error {
 		if text(m["status"]) == "rejected" && !nonempty(m["rejection_reason"]) {
 			return invalid("拒绝问题必须填写原因")
 		}
+	case "time_entries":
+		return validateTimeEntry(tx, m)
+	case "reminders":
+		return validateReminder(tx, m, before)
 	case "worklogs":
 		if !oneOf(m["period_type"], "day", "week") {
 			return invalid("日志周期无效")
@@ -668,7 +700,7 @@ func dbValue(k string, v any) any {
 		b, _ := json.Marshal(v)
 		return string(b)
 	}
-	if oneOf(k, "project_id", "parent_id") && text(v) == "" {
+	if oneOf(k, "project_id", "parent_id", "task_id", "record_id") && text(v) == "" {
 		return nil
 	}
 	return v
@@ -678,6 +710,9 @@ func dbErr(err error) error {
 		return nil
 	}
 	s := strings.ToLower(err.Error())
+	if strings.Contains(s, "unique constraint") && strings.Contains(s, "reminders.record_id") {
+		return fail("conflict", "该记录已有有效提醒，请先编辑或清除原提醒", 409)
+	}
 	if strings.Contains(s, "unique constraint") {
 		return fail("conflict", "编号或同项目同周期的日志已存在", 409)
 	}
@@ -709,6 +744,9 @@ func nextCode(tx *sql.Tx, kind string) string {
 	}
 }
 func (s *Store) Create(kind string, input map[string]any) (map[string]any, error) {
+	if kind == "reminders" {
+		return s.CreateReminder(input)
+	}
 	if err := kindOK(kind); err != nil {
 		return nil, err
 	}
@@ -738,7 +776,8 @@ func create(tx *sql.Tx, kind string, input map[string]any) (map[string]any, erro
 		m[k] = v
 	}
 	if kind == "records" {
-		if err = parseQuick(tx, m); err != nil {
+		_, specified := input["project_id"]
+		if err = parseQuick(tx, m, !specified); err != nil {
 			return nil, err
 		}
 	}
@@ -755,13 +794,19 @@ func create(tx *sql.Tx, kind string, input map[string]any) (map[string]any, erro
 	}
 	if kind == "tasks" {
 		var position int
-		if err = tx.QueryRow("SELECT COALESCE(max(sort_order),0)+1 FROM tasks WHERE project_id=? AND COALESCE(parent_id,'')=?", m["project_id"], text(m["parent_id"])).Scan(&position); err != nil {
+		if err = tx.QueryRow("SELECT COALESCE(max(sort_order),0)+1 FROM tasks WHERE project_id=? AND COALESCE(parent_id,'')=? AND deleted_at=''", m["project_id"], text(m["parent_id"])).Scan(&position); err != nil {
 			return nil, err
 		}
 		m["sort_order"] = position
 	}
 	if err = insert(tx, kind, m); err != nil {
 		return nil, err
+	}
+	reminderHint := ""
+	if kind == "records" {
+		if reminderHint, err = syncRecordReminder(tx, m, input, true); err != nil {
+			return nil, err
+		}
 	}
 	if kind == "tasks" {
 		if err = recalculate(tx, text(m["project_id"]), text(m["id"])); err != nil {
@@ -777,6 +822,9 @@ func create(tx *sql.Tx, kind string, input map[string]any) (map[string]any, erro
 	if err != nil {
 		return nil, err
 	}
+	if kind == "records" {
+		m["reminder_parse_hint"] = reminderHint
+	}
 	if err = searchSync(tx, kind, m); err != nil {
 		return nil, err
 	}
@@ -786,6 +834,9 @@ func create(tx *sql.Tx, kind string, input map[string]any) (map[string]any, erro
 	return m, nil
 }
 func (s *Store) Update(kind, id string, input map[string]any) (map[string]any, error) {
+	if kind == "reminders" {
+		return s.UpdateReminder(id, input)
+	}
 	if err := kindOK(kind); err != nil {
 		return nil, err
 	}
@@ -796,12 +847,27 @@ func (s *Store) Update(kind, id string, input map[string]any) (map[string]any, e
 		return nil, err
 	}
 	defer tx.Rollback()
+	m, err := update(tx, kind, id, input)
+	if err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+func update(tx *sql.Tx, kind, id string, input map[string]any) (map[string]any, error) {
 	before, err := get(tx, kind, id)
 	if err != nil {
 		return nil, err
 	}
 	if versionOf(input["version"]) != versionOf(before["version"]) {
 		return nil, fail("version_conflict", "内容已被修改，请刷新后重试", 409)
+	}
+	if kind == "time_entries" {
+		if err = timeProjectWritable(tx, text(before["project_id"])); err != nil {
+			return nil, err
+		}
 	}
 	if kind != "projects" {
 		if err = projectWritable(tx, text(before["project_id"]), ""); err != nil {
@@ -813,8 +879,16 @@ func (s *Store) Update(kind, id string, input map[string]any) (map[string]any, e
 		return nil, err
 	}
 	if kind == "tasks" {
+		if v, ok := in["parent_id"]; ok && text(v) != text(before["parent_id"]) {
+			return nil, invalid("请使用任务移动操作调整层级")
+		}
+		if v, ok := in["project_id"]; ok && text(v) != text(before["project_id"]) {
+			return nil, invalid("任务不能迁移到其他项目")
+		}
+	}
+	if kind == "tasks" {
 		var n int
-		if err = tx.QueryRow("SELECT count(*) FROM tasks WHERE parent_id=?", id).Scan(&n); err != nil {
+		if err = tx.QueryRow("SELECT count(*) FROM tasks WHERE parent_id=? AND deleted_at=''", id).Scan(&n); err != nil {
 			return nil, err
 		}
 		if n > 0 {
@@ -833,7 +907,9 @@ func (s *Store) Update(kind, id string, input map[string]any) (map[string]any, e
 		m[k] = v
 	}
 	if kind == "records" {
-		if err = parseQuick(tx, m); err != nil {
+		_, specified := in["project_id"]
+		_, contentChanged := in["content"]
+		if err = parseQuick(tx, m, !specified && contentChanged); err != nil {
 			return nil, err
 		}
 	}
@@ -850,7 +926,7 @@ func (s *Store) Update(kind, id string, input map[string]any) (map[string]any, e
 	if kind == "tasks" {
 		var order int
 		if text(m["parent_id"]) != text(before["parent_id"]) || text(m["project_id"]) != text(before["project_id"]) {
-			if err = tx.QueryRow("SELECT COALESCE(max(sort_order),0)+1 FROM tasks WHERE project_id=? AND COALESCE(parent_id,'')=?", m["project_id"], text(m["parent_id"])).Scan(&order); err != nil {
+			if err = tx.QueryRow("SELECT COALESCE(max(sort_order),0)+1 FROM tasks WHERE project_id=? AND COALESCE(parent_id,'')=? AND deleted_at=''", m["project_id"], text(m["parent_id"])).Scan(&order); err != nil {
 				return nil, err
 			}
 		} else {
@@ -893,17 +969,23 @@ func (s *Store) Update(kind, id string, input map[string]any) (map[string]any, e
 			return nil, err
 		}
 	}
+	reminderHint := ""
+	if kind == "records" {
+		if reminderHint, err = syncRecordReminder(tx, m, input, false); err != nil {
+			return nil, err
+		}
+	}
 	m, err = get(tx, kind, id)
 	if err != nil {
 		return nil, err
+	}
+	if kind == "records" {
+		m["reminder_parse_hint"] = reminderHint
 	}
 	if err = searchSync(tx, kind, m); err != nil {
 		return nil, err
 	}
 	if err = audit(tx, kind, id, "update", before, m); err != nil {
-		return nil, err
-	}
-	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
 	return m, nil
@@ -914,46 +996,6 @@ func issueHistory(tx *sql.Tx, m map[string]any, from, to string) error {
 	return err
 }
 func (s *Store) Delete(kind, id string, version int) error {
-	if err := kindOK(kind); err != nil {
-		return err
-	}
-	s.Mu.Lock()
-	defer s.Mu.Unlock()
-	tx, err := s.DB.Begin()
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback()
-	m, err := get(tx, kind, id)
-	if err != nil {
-		return err
-	}
-	if version != versionOf(m["version"]) {
-		return fail("version_conflict", "内容已被修改，请刷新后重试", 409)
-	}
-	pid := text(m["project_id"])
-	if kind == "projects" {
-		pid = id
-	}
-	if err = projectWritable(tx, pid, ""); err != nil {
-		return err
-	}
-	if (kind == "tasks" && text(m["status"]) == "done") || (kind == "issues" && oneOf(m["status"], "closed", "rejected")) {
-		return fail("read_only", "已结束内容不可删除", 409)
-	}
-	if _, err = tx.Exec("DELETE FROM "+kind+" WHERE id=? AND version=?", id, version); err != nil {
-		return dbErr(err)
-	}
-	if _, err = tx.Exec("DELETE FROM search_doc WHERE entity_type=? AND entity_id=?", kind, id); err != nil {
-		return err
-	}
-	if kind == "tasks" {
-		if err = recalculate(tx, pid, id); err != nil {
-			return err
-		}
-	}
-	if err = audit(tx, kind, id, "delete", m, nil); err != nil {
-		return err
-	}
-	return tx.Commit()
+	_, err := s.SoftDelete(kind, id, map[string]any{"version": version})
+	return err
 }

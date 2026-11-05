@@ -14,6 +14,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"projnote/internal/store"
 	"sort"
 	"strings"
 	"time"
@@ -33,6 +34,7 @@ type Info struct {
 	Name      string `json:"name"`
 	Size      int64  `json:"size"`
 	CreatedAt string `json:"created_at"`
+	Protected bool   `json:"protected"`
 }
 
 // Create must run while the caller holds the exclusive application write lock.
@@ -172,7 +174,8 @@ func List(root string) ([]Info, error) {
 		if err != nil {
 			return nil, err
 		}
-		list = append(list, Info{Name: e.Name(), Size: st.Size(), CreatedAt: st.ModTime().UTC().Format(time.RFC3339)})
+		_, protectErr := os.Stat(filepath.Join(root, "backups", e.Name()+".protected"))
+		list = append(list, Info{Name: e.Name(), Size: st.Size(), CreatedAt: st.ModTime().UTC().Format(time.RFC3339), Protected: protectErr == nil})
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].Name > list[j].Name })
 	return list, nil
@@ -313,8 +316,15 @@ func Extract(archive, parent string) (string, Manifest, error) {
 	if err == nil {
 		var version int
 		err = db.QueryRow("PRAGMA user_version").Scan(&version)
-		if err == nil && version != 1 {
+		if err == nil && (version < 1 || version > store.SchemaVersion) {
 			err = errors.New("备份数据库版本与当前程序不兼容")
+		}
+		if err == nil && version >= 3 {
+			var count int
+			err = db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('time_entries','reminders')").Scan(&count)
+			if err == nil && count != 2 {
+				err = errors.New("备份缺少此数据库版本必需的工时或提醒表")
+			}
 		}
 	}
 	cerr := db.Close()

@@ -28,7 +28,7 @@ import (
 	"projnote/internal/store"
 )
 
-var version = "0.1.0-dev"
+var version = "0.3.0-dev"
 
 type runtimeInfo struct {
 	URL      string `json:"url"`
@@ -65,6 +65,7 @@ func run() error {
 	noBrowser := flag.Bool("no-browser", false, "不自动打开浏览器")
 	restore := flag.String("restore", "", "停止服务后，从完整 ZIP 恢复；自动创建当前数据回滚备份")
 	verify := flag.String("verify-backup", "", "校验完整 ZIP 的全部文件哈希与数据库，不覆盖数据")
+	relocate := flag.String("relocate", "", "停服后复制数据到新的空目录，原目录保留")
 	stop := flag.Bool("stop", false, "结束此数据目录正在运行的服务")
 	flag.Parse()
 	if *verify != "" {
@@ -100,7 +101,7 @@ func run() error {
 	}
 	lock, err := platform.AcquireLock(filepath.Join(dataDir, "app.lock"))
 	if err != nil {
-		if *restore != "" {
+		if *restore != "" || *relocate != "" {
 			return errors.New("数据目录正在使用或无法加锁；请先退出服务再恢复")
 		}
 		info, e := existing(dataDir)
@@ -117,6 +118,12 @@ func run() error {
 	if err = backup.CheckInterrupted(dataDir); err != nil {
 		return err
 	}
+	if *restore != "" && *relocate != "" {
+		return errors.New("恢复和迁移不能同时执行")
+	}
+	if *relocate != "" {
+		return relocateOffline(dataDir, *relocate)
+	}
 	if *restore != "" {
 		return restoreOffline(dataDir, *restore)
 	}
@@ -130,7 +137,7 @@ func run() error {
 	}
 	defer logFile.Close()
 	slog.SetDefault(slog.New(slog.NewJSONHandler(logFile, nil)))
-	st, err := store.Open(dataDir)
+	st, err := openWithBackup(dataDir)
 	if err != nil {
 		return err
 	}
@@ -164,13 +171,14 @@ func run() error {
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 5 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
-	app := &server.Server{Store: st, DataDir: dataDir, Host: host, Version: version, RuntimeToken: info.Instance, Shutdown: cancel}
+	manager := newBackupManager(dataDir, st)
+	app := &server.Server{Backup: manager, Store: st, DataDir: dataDir, Host: host, Version: version, RuntimeToken: info.Instance, Shutdown: cancel}
 	srv.Handler = app.Handler()
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		ensureDaily(st, dataDir)
+		ensureDaily(manager)
 		ticker := time.NewTicker(30 * time.Minute)
 		defer ticker.Stop()
 		for {
@@ -178,7 +186,7 @@ func run() error {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				ensureDaily(st, dataDir)
+				ensureDaily(manager)
 			}
 		}
 	}()
@@ -261,31 +269,20 @@ func stopExisting(root string) error {
 	if resp.StatusCode != 200 {
 		return errors.New("服务未能退出")
 	}
-	fmt.Println("已通知服务退出。")
-	return nil
+	for deadline := time.Now().Add(20 * time.Second); time.Now().Before(deadline); {
+		lock, e := platform.AcquireLock(filepath.Join(root, "app.lock"))
+		if e == nil {
+			lock.Close()
+			fmt.Println("服务已退出。")
+			return nil
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	return errors.New("服务仍在完成活动请求，请稍后重试")
 }
-func ensureDaily(st *store.Store, root string) {
-	list, err := backup.List(root)
-	if err != nil {
-		slog.Error("automatic backup list failed", "error", err)
-		return
-	}
-	today := time.Now().Format("2006-01-02")
-	if len(list) > 0 {
-		if at, e := time.Parse(time.RFC3339, list[0].CreatedAt); e == nil && at.Local().Format("2006-01-02") == today {
-			return
-		}
-	}
-	st.Mu.Lock()
-	info, err := backup.Create(root, st.DB)
-	st.Mu.Unlock()
-	if err != nil {
+func ensureDaily(manager *backup.Manager) {
+	if err := manager.RunDaily(); err != nil {
 		slog.Error("automatic backup failed", "error", err)
-	} else {
-		slog.Info("automatic backup created", "name", info.Name)
-		if e := st.RecordEvent("backup", "system", info.Name, map[string]any{"size": info.Size, "automatic": true}); e != nil {
-			slog.Error("backup audit failed", "error", e)
-		}
 	}
 }
 func restoreOffline(root, archive string) error {
@@ -298,11 +295,11 @@ func restoreOffline(root, archive string) error {
 		return err
 	}
 	if _, e := os.Stat(filepath.Join(root, "app.db")); e == nil {
-		st, err := store.Open(root)
+		st, err := openWithBackup(root)
 		if err != nil {
 			return fmt.Errorf("当前数据库无法打开；已保留原数据，请先复制数据目录到新目录再恢复: %w", err)
 		}
-		info, e := backup.Create(root, st.DB)
+		info, e := newBackupManager(root, st).MigrationBackup("restore-rollback")
 		closeErr := st.Close()
 		if e != nil {
 			return fmt.Errorf("创建回滚备份失败: %w", e)
