@@ -333,7 +333,7 @@ func (s *Store) Today() (map[string]any, error) {
 		}
 		stats[k] = count
 	}
-	rows, err := s.DB.Query("SELECT t.* FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.deleted_at='' AND p.deleted_at='' AND t.status IN('todo','doing') AND p.status!='archived' AND (t.plan_start='' OR t.plan_start<=?) ORDER BY CASE WHEN t.plan_end='' THEN 1 ELSE 0 END,t.plan_end,t.priority,t.created_at LIMIT 100", d)
+	rows, err := s.DB.Query("SELECT t.*,EXISTS(SELECT 1 FROM tasks child WHERE child.parent_id=t.id AND child.deleted_at='') AS has_children FROM tasks t JOIN projects p ON p.id=t.project_id WHERE t.deleted_at='' AND p.deleted_at='' AND t.status IN('todo','doing') AND p.status!='archived' AND (t.plan_start='' OR t.plan_start<=?) ORDER BY CASE WHEN t.plan_end='' THEN 1 ELSE 0 END,t.plan_end,t.priority,t.created_at,t.id", d)
 	if err != nil {
 		return nil, err
 	}
@@ -384,18 +384,24 @@ func (s *Store) GenerateLog(input map[string]any) (map[string]any, error) {
 	if period == "" {
 		period = "day"
 	}
-	if !oneOf(period, "day", "week") {
-		return nil, invalid("日志周期无效")
+	start, end, err := logPeriodBounds(date, period)
+	if err != nil {
+		return nil, err
 	}
-	start, _ := time.ParseInLocation("2006-01-02", date, time.Local)
-	end := start.AddDate(0, 0, 1)
-	label := "工作日报"
-	if period == "week" {
-		start = start.AddDate(0, 0, -(int(start.Weekday())+6)%7)
-		end = start.AddDate(0, 0, 7)
-		label = "工作周报"
-	}
+	label := map[string]string{"day": "工作日报", "week": "工作周报", "month": "工作月报"}[period]
 	date = start.Format("2006-01-02")
+	assignee := ""
+	if value, provided := input["assignee"]; provided && value != nil {
+		var valid bool
+		assignee, valid = value.(string)
+		if !valid {
+			return nil, invalid("日志人员须为文本")
+		}
+		assignee = strings.TrimSpace(assignee)
+		if len([]rune(assignee)) > 100 {
+			return nil, invalid("日志人员不能超过 100 个字符")
+		}
+	}
 	pid := text(input["project_id"])
 	if pid != "" {
 		var n int
@@ -408,15 +414,34 @@ func (s *Store) GenerateLog(input map[string]any) (map[string]any, error) {
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# %s · %s\n\n", label, date)
+	if assignee != "" {
+		fmt.Fprintf(&b, "人员：%s（个人日志）\n\n", assignee)
+	}
 	for _, section := range []struct{ kind, title, col string }{{"tasks", "任务进展", "updated_at"}, {"records", "现场记录", "occurred_at"}, {"issues", "问题跟踪", "updated_at"}} {
 		fmt.Fprintf(&b, "## %s\n\n", section.title)
+		if assignee != "" && section.kind == "records" {
+			b.WriteString("现场记录为本机录入的个人记录，按本次日期和项目范围归集。\n\n")
+		}
 		where := " WHERE deleted_at='' AND julianday(" + section.col + ")>=julianday(?) AND julianday(" + section.col + ")<julianday(?)"
 		args := []any{start.UTC().Format(time.RFC3339Nano), end.UTC().Format(time.RFC3339Nano)}
 		if pid != "" {
 			where += " AND project_id=?"
 			args = append(args, pid)
 		}
-		rows, err := s.DB.Query("SELECT * FROM "+section.kind+where+" ORDER BY "+section.col+",id LIMIT 500", args...)
+		if assignee != "" {
+			if section.kind == "tasks" {
+				where += " AND assignee=?"
+				args = append(args, assignee)
+			} else if section.kind == "issues" {
+				where += " AND owner=?"
+				args = append(args, assignee)
+			}
+		}
+		query := "SELECT * FROM " + section.kind + where + " ORDER BY " + section.col + ",id"
+		if period != "month" {
+			query += " LIMIT 500"
+		}
+		rows, err := s.DB.Query(query, args...)
 		if err != nil {
 			return nil, err
 		}
@@ -447,6 +472,9 @@ func (s *Store) GenerateLog(input map[string]any) (map[string]any, error) {
 	if pid != "" {
 		filters["project_id"] = pid
 	}
+	if assignee != "" {
+		filters["assignee"] = assignee
+	}
 	summary, err := timeSummary(s.DB, filters)
 	if err != nil {
 		return nil, err
@@ -460,7 +488,11 @@ func (s *Store) GenerateLog(input map[string]any) (map[string]any, error) {
 		fmt.Fprintf(&b, "- %s：%d 分钟%s\n", text(day["date"]), int(num(day["minutes"])), warning)
 	}
 	b.WriteString("\n")
-	b.WriteString("## 后续计划\n\n- 待补充\n")
+	if period == "day" {
+		b.WriteString("## 明日计划\n\n- 待补充\n")
+	} else {
+		b.WriteString("## 后续计划\n\n- 待补充\n")
+	}
 	return map[string]any{"content": b.String(), "log_date": date, "period_type": period, "project_id": pid}, nil
 }
 func (s *Store) VerifyAudit() (map[string]any, error) {
@@ -504,7 +536,7 @@ func (s *Store) Demo() error {
 	}
 	defer tx.Rollback()
 	var count int
-	if err = tx.QueryRow("SELECT (SELECT count(*) FROM projects)+(SELECT count(*) FROM tasks)+(SELECT count(*) FROM records)+(SELECT count(*) FROM issues)+(SELECT count(*) FROM worklogs)").Scan(&count); err != nil {
+	if err = tx.QueryRow("SELECT (SELECT count(*) FROM projects)+(SELECT count(*) FROM tasks)+(SELECT count(*) FROM records)+(SELECT count(*) FROM issues)+(SELECT count(*) FROM worklogs)+(SELECT count(*) FROM meeting_minutes)").Scan(&count); err != nil {
 		return err
 	}
 	if count > 0 {

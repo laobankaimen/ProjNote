@@ -38,7 +38,7 @@ func settingValue(key string, v any) (string, error) {
 			return "", invalid("操作者必须是 1 至 80 个字符")
 		}
 		return strings.TrimSpace(str), nil
-	case "setup_completed", "backup_auto":
+	case "setup_completed", "backup_auto", "desktop_default":
 		if !oneOf(v, "0", "1") {
 			return "", invalid("设置必须为 0 或 1")
 		}
@@ -149,9 +149,19 @@ func (s *Store) SoftDelete(kind, id string, input map[string]any) (map[string]an
 		if err = projectWritable(tx, pid, ""); err != nil {
 			return nil, err
 		}
+		if kind == "meeting_minutes" {
+			if err = meetingProjectWritable(tx, pid); err != nil {
+				return nil, err
+			}
+		}
+		if oneOf(kind, "team_daily_entries", "project_daily_logs") {
+			if err = dailyProjectWritable(tx, pid); err != nil {
+				return nil, err
+			}
+		}
 		items := []map[string]any{m}
 		if kind == "projects" {
-			for _, child := range []string{"tasks", "records", "issues", "worklogs", "time_entries", "reminders"} {
+			for _, child := range []string{"tasks", "records", "issues", "worklogs", "time_entries", "reminders", "team_daily_entries", "project_daily_logs", "meeting_minutes"} {
 				var n int
 				if err = tx.QueryRow("SELECT count(*) FROM "+child+" WHERE project_id=?", id).Scan(&n); err != nil {
 					return nil, err
@@ -245,7 +255,7 @@ func (s *Store) ListTrash(filters map[string]string) (map[string]any, error) {
 		}
 	}
 	all := []map[string]any{}
-	for _, k := range []string{"projects", "tasks", "records", "issues", "worklogs", "time_entries", "reminders"} {
+	for _, k := range []string{"projects", "tasks", "records", "issues", "worklogs", "time_entries", "reminders", "team_daily_entries", "project_daily_logs", "meeting_minutes"} {
 		if kind != "" && kind != k {
 			continue
 		}
@@ -316,6 +326,21 @@ func (s *Store) RestoreTrash(kind, id string, input map[string]any) (map[string]
 			}
 			if text(parent["project_id"]) != text(before["project_id"]) {
 				return nil, invalid("父子任务必须属于同一项目")
+			}
+		}
+		if kind == "meeting_minutes" {
+			if err = validateMeeting(tx, before); err != nil {
+				return nil, err
+			}
+		}
+		if kind == "team_daily_entries" {
+			if err = validateTeamDailyEntry(tx, before); err != nil {
+				return nil, err
+			}
+		}
+		if kind == "project_daily_logs" {
+			if err = dailyProjectWritable(tx, text(before["project_id"])); err != nil {
+				return nil, err
 			}
 		}
 		if kind == "time_entries" {

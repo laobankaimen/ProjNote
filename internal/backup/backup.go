@@ -326,6 +326,45 @@ func Extract(archive, parent string) (string, Manifest, error) {
 				err = errors.New("备份缺少此数据库版本必需的工时或提醒表")
 			}
 		}
+		if err == nil && version >= 4 {
+			var count int
+			err = db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('team_daily_entries','project_daily_logs','task_imports')").Scan(&count)
+			if err == nil && count != 3 {
+				err = errors.New("备份缺少此数据库版本必需的项目日志或导入表")
+			}
+			if err == nil {
+				var columns int
+				err = db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('time_entries') WHERE name='assignee'").Scan(&columns)
+				if err == nil && columns != 1 {
+					err = errors.New("备份缺少此数据库版本必需的工时人员字段")
+				}
+			}
+
+		}
+
+		if err == nil && version >= 5 {
+			var count int
+			err = db.QueryRow("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('desktop_drafts','export_jobs')").Scan(&count)
+			if err == nil && count != 2 {
+				err = errors.New("备份缺少此数据库版本必需的桌面草稿或导出任务表")
+			}
+		}
+		if err == nil && version >= 6 {
+			var count int
+			err = db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('desktop_drafts') WHERE name='mode'").Scan(&count)
+			if err == nil && count != 1 {
+				err = errors.New("备份缺少此数据库版本必需的便签模式字段")
+			}
+		}
+
+		if err == nil && version >= 7 {
+			var count int
+			err = db.QueryRow("SELECT COUNT(*) FROM pragma_table_info('meeting_minutes') WHERE name IN ('id','code','project_id','title','meeting_date','location','attendees','content','created_at','updated_at','version','deleted_at')").Scan(&count)
+			if err == nil && count != 12 {
+				err = errors.New("备份缺少此数据库版本必需的会议纪要表或字段")
+			}
+		}
+
 	}
 	cerr := db.Close()
 	if err == nil {

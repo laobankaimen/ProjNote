@@ -1,6 +1,6 @@
 import { reactive } from 'vue'
 import type { Page, Project } from './types'
-export const ui = reactive({ toast: '', error: false, projects: [] as Project[], projectsLoaded: false, revision: 0, datasetId: '', dataDir: '' })
+export const ui = reactive({ toast: '', error: false, projects: [] as Project[], projectsLoaded: false, revision: 0, datasetId: '', dataDir: '', operator: '本人' })
 let toastTimer: ReturnType<typeof setTimeout> | undefined
 export function notify(message: string, error = false) { ui.toast = message; ui.error = error; clearTimeout(toastTimer); toastTimer = setTimeout(() => { ui.toast = '' }, error ? 9000 : 3500) }
 export function messageOf(error: unknown) { return error instanceof Error ? error.message : '请求失败，请稍后重试' }
@@ -42,3 +42,7 @@ export async function softDelete(kind:string,entity:{id:string;version:number},n
 export function dateTimeLocal(value?:string){if(!value)return '';const d=new Date(value);if(Number.isNaN(d.valueOf()))return '';return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-${String(d.getDate()).padStart(2,'0')}T${String(d.getHours()).padStart(2,'0')}:${String(d.getMinutes()).padStart(2,'0')}`}
 export function durationLabel(minutes:number){return `${Math.floor(minutes/60)} 小时${minutes%60?` ${minutes%60} 分钟`:''}`}
 export function isProjectReadOnly(id:string){return ui.projects.some(p=>p.id===id&&['closed','archived'].includes(p.status))}
+
+export async function openCompactWindow(){try{const result=await api<{opened:boolean;message?:string}>('/api/desktop/compact',{method:'POST',body:'{}'});if(!result.opened)throw new Error(result.message||'桌面便签未能打开');notify(result.message||'桌面便签已打开');return result}catch(e){notify(messageOf(e),true);return undefined}}
+
+export function worklogPeriodLabel(period:string){return ({day:"日报",week:"周报",month:"月报"} as Record<string,string>)[period]||"日志"}

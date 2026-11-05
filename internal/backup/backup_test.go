@@ -191,3 +191,94 @@ func TestSchemaThreeSnapshotMustIncludeNewDomainTables(t *testing.T) {
 		t.Fatal("accepted incomplete schema3 snapshot")
 	}
 }
+
+func TestSchemaFourSnapshotRequiresDomainTablesAndAssignee(t *testing.T) {
+	for _, corrupt := range []string{"DROP TABLE task_imports", "DROP INDEX time_entries_person_day; ALTER TABLE time_entries DROP COLUMN assignee"} {
+		t.Run(corrupt, func(t *testing.T) {
+			root := t.TempDir()
+			st, err := store.Open(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			if _, err = st.DB.Exec(corrupt); err != nil {
+				t.Fatal(err)
+			}
+			info, err := Create(root, st.DB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, _, err = Extract(filepath.Join(root, "backups", info.Name), t.TempDir()); err == nil {
+				t.Fatal("accepted incomplete schema4 backup")
+			}
+		})
+	}
+}
+
+func TestSchemaFiveSnapshotRequiresScratchAndExportTables(t *testing.T) {
+	for _, table := range []string{"desktop_drafts", "export_jobs"} {
+		t.Run(table, func(t *testing.T) {
+			root := t.TempDir()
+			st, e := store.Open(root)
+			if e != nil {
+				t.Fatal(e)
+			}
+			defer st.Close()
+			if _, e = st.DB.Exec("DROP TABLE " + table); e != nil {
+				t.Fatal(e)
+			}
+			snapshot, e := Create(root, st.DB)
+			if e != nil {
+				t.Fatal(e)
+			}
+			if stage, _, e := Extract(filepath.Join(root, "backups", snapshot.Name), t.TempDir()); e == nil {
+				os.RemoveAll(stage)
+				t.Fatal("incomplete schema5 backup accepted")
+			}
+		})
+	}
+}
+
+func TestSchemaSixSnapshotRequiresDesktopMode(t *testing.T) {
+	root := t.TempDir()
+	st, e := store.Open(root)
+	if e != nil {
+		t.Fatal(e)
+	}
+	defer st.Close()
+	if _, e = st.DB.Exec("ALTER TABLE desktop_drafts DROP COLUMN mode"); e != nil {
+		t.Fatal(e)
+	}
+	snapshot, e := Create(root, st.DB)
+	if e != nil {
+		t.Fatal(e)
+	}
+	if stage, _, e := Extract(filepath.Join(root, "backups", snapshot.Name), t.TempDir()); e == nil {
+		os.RemoveAll(stage)
+		t.Fatal("schema6 backup missing draft mode accepted")
+	}
+}
+
+func TestSchemaSevenSnapshotRequiresCompleteMeetingTable(t *testing.T) {
+	for _, corruption := range []string{"DROP TABLE meeting_minutes", "ALTER TABLE meeting_minutes DROP COLUMN location"} {
+		t.Run(corruption, func(t *testing.T) {
+			root := t.TempDir()
+			st, err := store.Open(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			if _, err = st.DB.Exec(corruption); err != nil {
+				t.Fatal(err)
+			}
+			snapshot, err := Create(root, st.DB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stage, _, err := Extract(filepath.Join(root, "backups", snapshot.Name), t.TempDir()); err == nil {
+				os.RemoveAll(stage)
+				t.Fatal("incomplete schema7 meeting backup accepted")
+			}
+		})
+	}
+}

@@ -17,6 +17,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -28,7 +29,7 @@ import (
 	"projnote/internal/store"
 )
 
-var version = "0.3.0-dev"
+var version = "0.3.5-dev"
 
 type runtimeInfo struct {
 	URL      string `json:"url"`
@@ -62,12 +63,18 @@ func defaultDataDir() string {
 func run() error {
 	dataFlag := flag.String("data-dir", "", "数据目录（默认程序同级 data，可写性不足时使用用户配置目录）")
 	port := flag.Int("port", 18600, "首选本地端口，冲突时顺延最多 99 个端口")
-	noBrowser := flag.Bool("no-browser", false, "不自动打开浏览器")
+	compact := flag.Bool("compact", false, "直接展开原生桌面便签（正常启动已默认显示贴边入口）")
+	browser := flag.Bool("browser", false, "显式打开浏览器工作台（默认只显示桌面便签入口）")
+	noBrowser := flag.Bool("no-browser", false, "仅启动服务，不自动打开浏览器和桌面入口")
+	noDesktop := flag.Bool("no-desktop", false, "本次不显示桌面便签入口")
 	restore := flag.String("restore", "", "停止服务后，从完整 ZIP 恢复；自动创建当前数据回滚备份")
 	verify := flag.String("verify-backup", "", "校验完整 ZIP 的全部文件哈希与数据库，不覆盖数据")
 	relocate := flag.String("relocate", "", "停服后复制数据到新的空目录，原目录保留")
 	stop := flag.Bool("stop", false, "结束此数据目录正在运行的服务")
 	flag.Parse()
+	if err := validateStartupFlags(*compact, *browser, *noBrowser, *noDesktop); err != nil {
+		return err
+	}
 	if *verify != "" {
 		parent, err := os.MkdirTemp("", "projnote-verify-")
 		if err != nil {
@@ -109,7 +116,16 @@ func run() error {
 			return fmt.Errorf("无法锁定数据目录，且未发现可验证的运行实例: %w", err)
 		}
 		fmt.Println("ProjNote 已在运行：", info.URL)
-		if !*noBrowser {
+		if *compact {
+			return requestExistingCompact(info.URL)
+		}
+		startup := desktopStartup(*compact, *browser, *noBrowser, *noDesktop, "1")
+		if startup.desktop && existingDesktopEnabled(info.URL) {
+			if e = requestExistingEntry(info.URL); e != nil {
+				fmt.Println("桌面入口未启动：", e)
+			}
+		}
+		if startup.browser {
 			return platform.OpenBrowser(info.URL)
 		}
 		return nil
@@ -173,6 +189,56 @@ func run() error {
 	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 5 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	manager := newBackupManager(dataDir, st)
 	app := &server.Server{Backup: manager, Store: st, DataDir: dataDir, Host: host, Version: version, RuntimeToken: info.Instance, Shutdown: cancel}
+	var compactMu sync.Mutex
+	var compactEntry io.Closer
+	ensureCompact := func(expand bool) error {
+		compactMu.Lock()
+		defer compactMu.Unlock()
+		if compactEntry != nil {
+			var revealErr error
+			if expand {
+				revealErr = platform.ShowCompact(compactEntry)
+			} else {
+				revealErr = platform.ShowCompactEntry(compactEntry)
+			}
+			if revealErr == nil {
+				return nil
+			}
+			_ = compactEntry.Close()
+			compactEntry = nil
+		}
+		entry, e := platform.StartCompact(ctx, info.URL+"/#/compact", info.URL)
+		if e != nil {
+			return e
+		}
+		compactEntry = entry
+		if expand {
+			if e = platform.ShowCompact(entry); e != nil {
+				_ = entry.Close()
+				compactEntry = nil
+				return e
+			}
+		}
+		state := platform.CompactEntryState(entry)
+		slog.Info("compact entry started", "backend", state.Backend, "limitation", state.Limitation)
+		if state.Limitation != "" {
+			fmt.Println(state.Limitation)
+		}
+		return nil
+	}
+	app.OpenCompact = func() error { return ensureCompact(true) }
+	app.OpenCompactEntry = func() error { return ensureCompact(false) }
+	defer func() {
+		compactMu.Lock()
+		defer compactMu.Unlock()
+		if compactEntry != nil {
+			_ = compactEntry.Close()
+		}
+	}()
+	if err = app.InitializeExports(); err != nil {
+		return err
+	}
+	defer app.CloseExports()
 	srv.Handler = app.Handler()
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -201,12 +267,24 @@ func run() error {
 		}
 	}()
 	fmt.Printf("ProjNote %s\n本机地址：%s\n数据目录：%s\n关闭浏览器后服务仍运行，可在设置中退出或使用 --stop。\n", version, info.URL, dataDir)
-	if !*noBrowser {
+	settings, e := st.Settings()
+	if e != nil {
+		return e
+	}
+	startup := desktopStartup(*compact, *browser, *noBrowser, *noDesktop, fmt.Sprint(settings["desktop_default"]))
+	if startup.desktop {
+		if e := ensureCompact(startup.expand); e != nil {
+			slog.Warn("compact unavailable", "error", e)
+			fmt.Println("桌面入口未启动：", e)
+		}
+	}
+	if startup.browser {
 		if e := platform.OpenBrowser(info.URL); e != nil {
 			slog.Warn("browser unavailable", "error", e)
 			fmt.Println("请手动打开上面的本机地址。")
 		}
 	}
+
 	err = srv.Serve(listener)
 	cancel()
 	wg.Wait()
@@ -215,6 +293,46 @@ func run() error {
 	}
 	return err
 }
+
+type desktopStartupOptions struct{ desktop, expand, browser bool }
+
+func desktopStartup(compact, browser, noBrowser, noDesktop bool, preference string) desktopStartupOptions {
+	if compact {
+		return desktopStartupOptions{desktop: !noDesktop, expand: !noDesktop}
+	}
+	return desktopStartupOptions{desktop: !noBrowser && !noDesktop && preference != "0", browser: browser && !noBrowser}
+}
+func validateStartupFlags(compact, browser, noBrowser, noDesktop bool) error {
+	if compact && noDesktop {
+		return errors.New("--compact 与 --no-desktop 不能同时使用")
+	}
+	if browser && noBrowser {
+		return errors.New("--browser 与 --no-browser 不能同时使用")
+	}
+	if browser && compact {
+		return errors.New("--browser 与 --compact 不能同时使用，请选择浏览器工作台或原生便签")
+	}
+	return nil
+}
+
+func existingDesktopEnabled(base string) bool {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.Proxy = nil
+	client := &http.Client{Timeout: 2 * time.Second, Transport: transport, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	response, err := client.Get(base + "/api/settings")
+	if err != nil {
+		return true
+	}
+	defer response.Body.Close()
+	var envelope struct {
+		Data map[string]any `json:"data"`
+	}
+	if response.StatusCode != 200 || json.NewDecoder(io.LimitReader(response.Body, 1<<20)).Decode(&envelope) != nil {
+		return true
+	}
+	return envelope.Data["desktop_default"] != "0"
+}
+
 func existing(root string) (runtimeInfo, error) {
 	var info runtimeInfo
 	b, err := os.ReadFile(filepath.Join(root, "runtime.json"))
@@ -342,4 +460,37 @@ func validateSnapshot(root string) error {
 		return fmt.Errorf("备份审计链校验失败: %v", result["broken_at"])
 	}
 	return files.CheckReferences(root, st.DB)
+}
+
+func requestExistingCompact(base string) error { return requestExistingDesktop(base, "compact") }
+func requestExistingEntry(base string) error   { return requestExistingDesktop(base, "entry") }
+func requestExistingDesktop(base, action string) error {
+	request, err := http.NewRequest("POST", base+"/api/desktop/"+action, strings.NewReader("{}"))
+	if err != nil {
+		return err
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-ProjNote-Request", "1")
+	response, err := (&http.Client{Timeout: 10 * time.Second}).Do(request)
+	if err != nil {
+		return err
+	}
+	defer response.Body.Close()
+	if response.StatusCode == http.StatusOK {
+		return nil
+	}
+	if response.StatusCode == http.StatusNotFound && action == "entry" {
+		return errors.New("正在运行的是旧版本，请先退出旧程序再启动新版以显示便签入口")
+	}
+
+	var result struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	_ = json.NewDecoder(io.LimitReader(response.Body, 16384)).Decode(&result)
+	if result.Error.Message != "" {
+		return errors.New(result.Error.Message)
+	}
+	return fmt.Errorf("桌面入口启动失败：HTTP %d", response.StatusCode)
 }

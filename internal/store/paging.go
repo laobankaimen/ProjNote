@@ -95,6 +95,24 @@ func filterWhere(kind string, filters map[string]string) (string, []any, error) 
 			return "", nil, invalid("开始日期不能晚于结束日期")
 		}
 	}
+	if kind == "meeting_minutes" {
+		for _, key := range []string{"date_from", "date_to"} {
+			if value := filters[key]; value != "" {
+				if !validDate(value) {
+					return "", nil, invalid("会议日期须为真实 YYYY-MM-DD 日期")
+				}
+				op := ">="
+				if key == "date_to" {
+					op = "<="
+				}
+				where += " AND meeting_date" + op + "?"
+				args = append(args, value)
+			}
+		}
+		if filters["date_from"] != "" && filters["date_to"] != "" && filters["date_from"] > filters["date_to"] {
+			return "", nil, invalid("开始日期不能晚于结束日期")
+		}
+	}
 	return where, args, nil
 }
 func listRows(q queryer, kind string, filters map[string]string) ([]map[string]any, int, error) {
@@ -117,6 +135,9 @@ func listRows(q queryer, kind string, filters map[string]string) ([]map[string]a
 	}
 	if kind == "records" {
 		order = recordTimeKey + " DESC,id DESC"
+	}
+	if kind == "meeting_minutes" {
+		order = "meeting_date DESC,created_at DESC,id DESC"
 	}
 	args = append(args, limit, offset)
 	selectColumns := "*"
@@ -280,11 +301,16 @@ func (s *Store) SearchPage(filters map[string]string) (map[string]any, error) {
 		}
 	}
 	if len(recordFilters) > 0 {
-		rw, ra, err := filterWhere("records", recordFilters)
+		filteredKind := "records"
+		if kind == "meeting_minutes" && recordFilters["tag"] == "" && recordFilters["type"] == "" {
+			filteredKind = "meeting_minutes"
+		}
+		rw, ra, err := filterWhere(filteredKind, recordFilters)
 		if err != nil {
 			return nil, err
 		}
-		where += " AND d.entity_type='records' AND d.entity_id IN(SELECT id FROM records" + rw + ")"
+		where += " AND d.entity_type=? AND d.entity_id IN(SELECT id FROM " + filteredKind + rw + ")"
+		args = append(args, filteredKind)
 		args = append(args, ra...)
 	}
 	var total int

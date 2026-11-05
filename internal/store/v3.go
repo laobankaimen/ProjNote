@@ -39,6 +39,11 @@ func validateTimeEntry(tx *sql.Tx, m map[string]any) error {
 	if err := timeProjectWritable(tx, text(m["project_id"])); err != nil {
 		return err
 	}
+	assignee, ok := m["assignee"].(string)
+	if !ok || strings.TrimSpace(assignee) == "" || len([]rune(strings.TrimSpace(assignee))) > 100 {
+		return invalid("工时登记人必须是 1 至 100 个字符")
+	}
+	m["assignee"] = strings.TrimSpace(assignee)
 	if !nonempty(m["work_date"]) || !validDate(m["work_date"]) {
 		return invalid("工时日期格式应为 YYYY-MM-DD")
 	}
@@ -63,11 +68,11 @@ func validateTimeEntry(tx *sql.Tx, m map[string]any) error {
 		}
 	}
 	var total int
-	if err := tx.QueryRow("SELECT COALESCE(sum(minutes),0) FROM time_entries WHERE work_date=? AND deleted_at='' AND id!=?", m["work_date"], m["id"]).Scan(&total); err != nil {
+	if err := tx.QueryRow("SELECT COALESCE(sum(minutes),0) FROM time_entries WHERE work_date=? AND assignee=? AND deleted_at='' AND id!=?", m["work_date"], m["assignee"], m["id"]).Scan(&total); err != nil {
 		return err
 	}
 	if total+int(minutes) > 1440 {
-		return fail("daily_time_limit", "当日所有项目工时合计不能超过 1440 分钟", 409)
+		return fail("daily_time_limit", "该登记人当日所有项目工时合计不能超过 1440 分钟", 409)
 	}
 	return nil
 }
@@ -111,7 +116,7 @@ func timeWhere(filters map[string]string) (string, []any, error) {
 	filters = canonicalFilters(filters)
 	where := " WHERE e.deleted_at=''"
 	args := []any{}
-	for _, key := range []string{"project_id", "task_id", "work_date"} {
+	for _, key := range []string{"project_id", "task_id", "work_date", "assignee"} {
 		if value, ok := filters[key]; ok {
 			if key == "work_date" && !validDate(value) {
 				return "", nil, invalid("工时日期无效")
@@ -165,7 +170,7 @@ func timeSummary(q queryer, filters map[string]string) (map[string]any, error) {
 		return nil, err
 	}
 	out["total_minutes"] = total
-	for _, group := range []struct{ key, query string }{{"by_day", "SELECT e.work_date AS date,sum(e.minutes) AS minutes FROM time_entries e" + where + " GROUP BY e.work_date ORDER BY e.work_date"}, {"by_project", "SELECT e.project_id,p.name AS project_name,sum(e.minutes) AS minutes FROM time_entries e JOIN projects p ON p.id=e.project_id" + where + " GROUP BY e.project_id ORDER BY minutes DESC,e.project_id"}, {"by_task", "SELECT COALESCE(e.task_id,'') AS task_id,e.project_id,COALESCE(t.name,'未关联任务') AS task_name,sum(e.minutes) AS minutes FROM time_entries e LEFT JOIN tasks t ON t.id=e.task_id" + where + " GROUP BY e.project_id,COALESCE(e.task_id,'') ORDER BY minutes DESC,e.project_id,task_id"}} {
+	for _, group := range []struct{ key, query string }{{"by_day", "SELECT e.work_date AS date,sum(e.minutes) AS minutes FROM time_entries e" + where + " GROUP BY e.work_date ORDER BY e.work_date"}, {"by_project", "SELECT e.project_id,p.name AS project_name,sum(e.minutes) AS minutes FROM time_entries e JOIN projects p ON p.id=e.project_id" + where + " GROUP BY e.project_id ORDER BY minutes DESC,e.project_id"}, {"by_assignee", "SELECT e.assignee,sum(e.minutes) AS minutes FROM time_entries e" + where + " GROUP BY e.assignee ORDER BY minutes DESC,e.assignee"}, {"by_person", "SELECT e.assignee,sum(e.minutes) AS minutes FROM time_entries e" + where + " GROUP BY e.assignee ORDER BY minutes DESC,e.assignee"}, {"by_person_day", "SELECT e.assignee,e.work_date AS date,sum(e.minutes) AS minutes FROM time_entries e" + where + " GROUP BY e.assignee,e.work_date ORDER BY e.work_date,e.assignee"}, {"by_task", "SELECT COALESCE(e.task_id,'') AS task_id,e.project_id,COALESCE(t.name,'未关联任务') AS task_name,sum(e.minutes) AS minutes FROM time_entries e LEFT JOIN tasks t ON t.id=e.task_id" + where + " GROUP BY e.project_id,COALESCE(e.task_id,'') ORDER BY minutes DESC,e.project_id,task_id"}} {
 		rows, e := q.Query(group.query, args...)
 		if e != nil {
 			return nil, e
@@ -174,7 +179,7 @@ func timeSummary(q queryer, filters map[string]string) (map[string]any, error) {
 		if e != nil {
 			return nil, e
 		}
-		if group.key == "by_day" {
+		if group.key == "by_person_day" || group.key == "by_day" {
 			for _, m := range items {
 				m["over_eight_hours"] = num(m["minutes"]) > 480
 			}

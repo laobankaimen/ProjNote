@@ -11,8 +11,10 @@ func TestTimeEntryHTTPRoundTripAndHistory(t *testing.T) {
 	s := testServer(t)
 	headers := map[string]string{"Content-Type": "application/json", "X-ProjNote-Request": "1"}
 	request := func(method, path string, data map[string]any) map[string]any {
-		raw:=[]byte{}
-        if data!=nil{raw,_=json.Marshal(data)}
+		raw := []byte{}
+		if data != nil {
+			raw, _ = json.Marshal(data)
+		}
 		return decodeData(t, call(s, method, path, string(raw), headers))
 	}
 	project := request("POST", "/api/projects", map[string]any{"name": "工时项目"})

@@ -19,7 +19,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 3
+const SchemaVersion = 7
 
 type AppError struct {
 	Code    string
@@ -42,13 +42,16 @@ type queryer interface {
 }
 
 var columns = map[string][]string{
-	"projects":     strings.Fields("id code name customer phase manager start_date end_date status description created_at updated_at version deleted_at"),
-	"tasks":        strings.Fields("id project_id parent_id wbs_code name assignee plan_start plan_end progress status priority estimate_hours description actual_start actual_end created_at updated_at version sort_order deleted_at"),
-	"records":      strings.Fields("id code project_id type title content location occurred_at tags attachments created_at updated_at version deleted_at"),
-	"issues":       strings.Fields("id code project_id title description severity source status owner due_at root_cause solution verify_result rejection_reason closed_at created_at updated_at version deleted_at"),
-	"worklogs":     strings.Fields("id project_id period_type log_date content created_at updated_at version deleted_at"),
-	"time_entries": strings.Fields("id project_id task_id work_date minutes note created_at updated_at version deleted_at"),
-	"reminders":    strings.Fields("id title project_id record_id due_at created_at updated_at version done_at deleted_at"),
+	"projects":           strings.Fields("id code name customer phase manager start_date end_date status description created_at updated_at version deleted_at"),
+	"tasks":              strings.Fields("id project_id parent_id wbs_code name assignee plan_start plan_end progress status priority estimate_hours description actual_start actual_end created_at updated_at version sort_order deleted_at"),
+	"records":            strings.Fields("id code project_id type title content location occurred_at tags attachments created_at updated_at version deleted_at"),
+	"issues":             strings.Fields("id code project_id title description severity source status owner due_at root_cause solution verify_result rejection_reason closed_at created_at updated_at version deleted_at"),
+	"worklogs":           strings.Fields("id project_id period_type log_date content created_at updated_at version deleted_at"),
+	"time_entries":       strings.Fields("id project_id task_id work_date minutes note created_at updated_at version deleted_at assignee"),
+	"team_daily_entries": strings.Fields("id project_id log_date person_name content next_plan blockers task_ids created_at updated_at version deleted_at"),
+	"project_daily_logs": strings.Fields("id project_id log_date content source_snapshot created_at updated_at version deleted_at"),
+	"meeting_minutes":    strings.Fields("id code project_id title meeting_date location attendees content created_at updated_at version deleted_at"),
+	"reminders":          strings.Fields("id title project_id record_id due_at created_at updated_at version done_at deleted_at"),
 }
 
 func Open(dataDir string) (*Store, error) {
@@ -90,17 +93,8 @@ func (s *Store) migrate() error {
 	if version == SchemaVersion {
 		return tx.Commit()
 	}
-	if version == 2 {
-		if err = migrateV3(tx); err != nil {
-			return err
-		}
-		return tx.Commit()
-	}
-	if version == 1 {
-		if err = migrateV2(tx); err != nil {
-			return err
-		}
-		if err = migrateV3(tx); err != nil {
+	if version >= 1 {
+		if err = migrateAfter(tx, version); err != nil {
 			return err
 		}
 		return tx.Commit()
@@ -127,13 +121,23 @@ PRAGMA user_version=1;`
 	if _, err = tx.Exec(schema); err != nil {
 		return fmt.Errorf("初始化数据库: %w", err)
 	}
-	if err = migrateV2(tx); err != nil {
-		return err
-	}
-	if err = migrateV3(tx); err != nil {
+	if err = migrateAfter(tx, 1); err != nil {
 		return err
 	}
 	return tx.Commit()
+}
+func migrateAfter(tx *sql.Tx, version int) error {
+	for _, step := range []struct {
+		version int
+		apply   func(*sql.Tx) error
+	}{{2, migrateV2}, {3, migrateV3}, {4, migrateV4}, {5, migrateV5}, {6, migrateV6}, {7, migrateV7}} {
+		if version < step.version {
+			if err := step.apply(tx); err != nil {
+				return fmt.Errorf("升级数据库至版本 %d: %w", step.version, err)
+			}
+		}
+	}
+	return nil
 }
 func kindOK(kind string) error {
 	if _, ok := columns[kind]; !ok {
@@ -216,6 +220,20 @@ func normalize(kind string, m map[string]any) map[string]any {
 			}
 			m[k] = a
 		}
+	}
+	if kind == "team_daily_entries" {
+		var ids []any
+		if json.Unmarshal([]byte(text(m["task_ids"])), &ids) != nil || ids == nil {
+			ids = []any{}
+		}
+		m["task_ids"] = ids
+	}
+	if kind == "project_daily_logs" {
+		var snapshot map[string]any
+		if json.Unmarshal([]byte(text(m["source_snapshot"])), &snapshot) != nil || snapshot == nil {
+			snapshot = map[string]any{}
+		}
+		m["source_snapshot"] = snapshot
 	}
 	if kind == "tasks" {
 		if v, ok := m["has_children"]; ok {
@@ -382,11 +400,14 @@ func searchSync(tx *sql.Tx, kind string, m map[string]any) error {
 	if kind == "time_entries" {
 		title = text(m["work_date"]) + " 工时 " + text(m["minutes"]) + " 分钟"
 	}
+	if oneOf(kind, "team_daily_entries", "project_daily_logs") {
+		title = text(m["log_date"]) + " " + text(m["person_name"]) + " 项目日报"
+	}
 	if kind == "worklogs" {
 		title = text(m["log_date"]) + " " + text(m["period_type"])
 	}
 	body := []string{}
-	for _, k := range []string{"code", "description", "content", "location", "root_cause", "solution", "verify_result", "owner", "assignee", "customer", "manager", "note", "work_date", "due_at"} {
+	for _, k := range []string{"code", "description", "content", "location", "root_cause", "solution", "verify_result", "owner", "assignee", "customer", "manager", "note", "work_date", "due_at", "person_name", "next_plan", "blockers", "attendees", "meeting_date"} {
 		if nonempty(m[k]) {
 			body = append(body, text(m[k]))
 		}
@@ -424,6 +445,9 @@ func cleanInput(kind string, input map[string]any, creating bool) (map[string]an
 		allowed[c] = true
 	}
 	for k, v := range input {
+		if kind == "meeting_minutes" && k == "code" {
+			return nil, invalid("会议编号由服务器生成")
+		}
 		if kind == "records" && k == "reminder_due_at" {
 			out[k] = v
 			continue
@@ -474,6 +498,12 @@ func defaults(kind string) map[string]any {
 	case "time_entries":
 		m["work_date"] = today()
 		m["minutes"] = 0
+	case "team_daily_entries":
+		m["log_date"] = today()
+		m["task_ids"] = []any{}
+	case "project_daily_logs":
+		m["log_date"] = today()
+		m["source_snapshot"] = map[string]any{}
 	case "reminders":
 		m["due_at"] = ""
 	case "worklogs":
@@ -501,7 +531,7 @@ func validate(tx *sql.Tx, kind string, m, before map[string]any) error {
 		}
 	}
 	for _, c := range columns[kind] {
-		if !oneOf(c, "progress", "priority", "estimate_hours", "version", "sort_order", "tags", "attachments", "minutes") && m[c] != nil {
+		if !oneOf(c, "progress", "priority", "estimate_hours", "version", "sort_order", "tags", "attachments", "minutes", "task_ids", "source_snapshot") && m[c] != nil {
 			if _, ok := m[c].(string); !ok {
 				return invalid("字段必须是文本: " + c)
 			}
@@ -665,23 +695,24 @@ func validate(tx *sql.Tx, kind string, m, before map[string]any) error {
 		return validateTimeEntry(tx, m)
 	case "reminders":
 		return validateReminder(tx, m, before)
+	case "team_daily_entries":
+		return validateTeamDailyEntry(tx, m)
+	case "project_daily_logs":
+		return validateProjectDailyLog(tx, m, before)
+	case "meeting_minutes":
+		return validateMeeting(tx, m)
 	case "worklogs":
-		if !oneOf(m["period_type"], "day", "week") {
-			return invalid("日志周期无效")
-		}
 		if !nonempty(m["content"]) {
 			return invalid("日志内容不能为空")
 		}
 		if !nonempty(m["log_date"]) {
 			return invalid("日志日期不能为空")
 		}
-		if text(m["period_type"]) == "week" {
-			t, _ := time.Parse("2006-01-02", text(m["log_date"]))
-			if !t.IsZero() {
-				delta := (int(t.Weekday()) + 6) % 7
-				m["log_date"] = t.AddDate(0, 0, -delta).Format("2006-01-02")
-			}
+		start, _, err := logPeriodBounds(text(m["log_date"]), text(m["period_type"]))
+		if err != nil {
+			return err
 		}
+		m["log_date"] = start.Format("2006-01-02")
 	}
 	for _, k := range []string{"start_date", "end_date", "plan_start", "plan_end", "actual_start", "actual_end", "log_date", "due_at"} {
 		if v, ok := m[k]; ok && !validDate(v) {
@@ -696,7 +727,7 @@ func validate(tx *sql.Tx, kind string, m, before map[string]any) error {
 	return nil
 }
 func dbValue(k string, v any) any {
-	if oneOf(k, "tags", "attachments") {
+	if oneOf(k, "tags", "attachments", "task_ids", "source_snapshot") {
 		b, _ := json.Marshal(v)
 		return string(b)
 	}
@@ -710,6 +741,12 @@ func dbErr(err error) error {
 		return nil
 	}
 	s := strings.ToLower(err.Error())
+	if strings.Contains(s, "unique constraint") && strings.Contains(s, "team_daily_entries.") {
+		return fail("conflict", "该项目同一天同一人员的团队条目已存在，请编辑现有条目", 409)
+	}
+	if strings.Contains(s, "unique constraint") && strings.Contains(s, "project_daily_logs.") {
+		return fail("conflict", "该项目当天日报已存在，请加载当前版本后编辑", 409)
+	}
 	if strings.Contains(s, "unique constraint") && strings.Contains(s, "reminders.record_id") {
 		return fail("conflict", "该记录已有有效提醒，请先编辑或清除原提醒", 409)
 	}
@@ -733,7 +770,7 @@ func insert(tx *sql.Tx, kind string, m map[string]any) error {
 	return dbErr(err)
 }
 func nextCode(tx *sql.Tx, kind string) string {
-	prefix := map[string]string{"projects": "PRJ", "records": "REC", "issues": "ISS"}[kind]
+	prefix := map[string]string{"projects": "PRJ", "records": "REC", "issues": "ISS", "meeting_minutes": "MTG"}[kind]
 	for i := 1; ; i++ {
 		code := fmt.Sprintf("%s-%s-%03d", prefix, time.Now().Format("20060102"), i)
 		var n int
@@ -775,6 +812,9 @@ func create(tx *sql.Tx, kind string, input map[string]any) (map[string]any, erro
 	for k, v := range in {
 		m[k] = v
 	}
+	if kind == "time_entries" && !nonempty(m["assignee"]) {
+		m["assignee"] = operator(tx)
+	}
 	if kind == "records" {
 		_, specified := input["project_id"]
 		if err = parseQuick(tx, m, !specified); err != nil {
@@ -787,7 +827,7 @@ func create(tx *sql.Tx, kind string, input map[string]any) (map[string]any, erro
 	if err = validate(tx, kind, m, nil); err != nil {
 		return nil, err
 	}
-	if kind == "projects" || kind == "records" || kind == "issues" {
+	if kind == "projects" || kind == "records" || kind == "issues" || kind == "meeting_minutes" {
 		if !nonempty(m["code"]) {
 			m["code"] = nextCode(tx, kind)
 		}
@@ -864,6 +904,16 @@ func update(tx *sql.Tx, kind, id string, input map[string]any) (map[string]any, 
 	if versionOf(input["version"]) != versionOf(before["version"]) {
 		return nil, fail("version_conflict", "内容已被修改，请刷新后重试", 409)
 	}
+	if kind == "meeting_minutes" {
+		if err = meetingProjectWritable(tx, text(before["project_id"])); err != nil {
+			return nil, err
+		}
+	}
+	if oneOf(kind, "team_daily_entries", "project_daily_logs") {
+		if err = dailyProjectWritable(tx, text(before["project_id"])); err != nil {
+			return nil, err
+		}
+	}
 	if kind == "time_entries" {
 		if err = timeProjectWritable(tx, text(before["project_id"])); err != nil {
 			return nil, err
@@ -917,6 +967,10 @@ func update(tx *sql.Tx, kind, id string, input map[string]any) (map[string]any, 
 		if err = projectWritable(tx, text(m["project_id"]), kind); err != nil {
 			return nil, err
 		}
+	}
+	if kind == "project_daily_logs" {
+		_, explicit := in["source_snapshot"]
+		m["_source_snapshot_explicit"] = explicit
 	}
 	if err = validate(tx, kind, m, before); err != nil {
 		return nil, err

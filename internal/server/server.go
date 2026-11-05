@@ -24,14 +24,20 @@ import (
 )
 
 type Server struct {
-	Store        *store.Store
-	DataDir      string
-	Host         string
-	Version      string
-	RuntimeToken string
-	Shutdown     func()
-	Backup       *backup.Manager
-	backupOnce   sync.Once
+	Store            *store.Store
+	DataDir          string
+	Host             string
+	Version          string
+	RuntimeToken     string
+	Shutdown         func()
+	Backup           *backup.Manager
+	backupOnce       sync.Once
+	importOnce       sync.Once
+	importSecret     []byte
+	OpenCompact      func() error
+	OpenCompactEntry func() error
+	exports          exportRuntime
+	exportWorker     sync.Mutex
 }
 
 func (s *Server) Handler() http.Handler {
@@ -97,12 +103,15 @@ func handleErr(w http.ResponseWriter, err error) {
 	writeError(w, 500, "internal_error", "操作失败，请查看运行日志")
 }
 func body(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
+	return bodyLimit(w, r, 2<<20)
+}
+func bodyLimit(w http.ResponseWriter, r *http.Request, max int64) (map[string]any, bool) {
 	media, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
 	if media != "application/json" {
 		writeError(w, 415, "unsupported_content_type", "请使用 JSON 请求")
 		return nil, false
 	}
-	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	r.Body = http.MaxBytesReader(w, r.Body, max)
 	dec := json.NewDecoder(r.Body)
 	var input map[string]any
 	if err := dec.Decode(&input); err != nil || input == nil {
@@ -119,6 +128,66 @@ func body(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	p := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/"), "/"), "/")
 	kind := p[0]
+	if kind == "meeting-minutes" {
+		kind = "meeting_minutes"
+	}
+	if kind == "export-print.js" && len(p) == 1 && r.Method == "GET" {
+		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+		_, _ = io.WriteString(w, `"use strict";const button=document.getElementById("print-report");if(button){button.disabled=false;button.addEventListener("click",()=>window.print());}`)
+		return
+	}
+	if kind == "export-jobs" || kind == "export-templates" {
+		s.exportsAPI(w, r, p)
+		return
+	}
+	if kind == "desktop" && len(p) == 2 && p[1] == "draft" {
+		s.desktopDraft(w, r)
+		return
+	}
+	if kind == "logs" && len(p) == 2 && p[1] == "next-plan-candidates" && r.Method == "POST" {
+		input, ok := body(w, r)
+		if !ok {
+			return
+		}
+		result, err := s.Store.NextPlan(input)
+		if err != nil {
+			handleErr(w, err)
+		} else {
+			jsonResult(w, 200, result)
+		}
+		return
+	}
+
+	if kind == "projects" && len(p) >= 3 && p[2] == "import" {
+		s.importTasks(w, r, p)
+		return
+	}
+	if kind == "team-daily-entries" || kind == "project-daily-logs" {
+		if !(len(p) == 3 && p[2] == "history") {
+			s.journals(w, r, p)
+			return
+		}
+	}
+	if kind == "desktop" && len(p) == 2 && (p[1] == "compact" || p[1] == "entry") && r.Method == "POST" {
+		hook := s.OpenCompact
+		if p[1] == "entry" {
+			hook = s.OpenCompactEntry
+		}
+		if hook == nil {
+			writeError(w, 501, "compact_unavailable", "当前启动方式未提供原生桌面入口，请使用桌面版程序启动")
+			return
+		}
+		if err := hook(); err != nil {
+			writeError(w, 503, "compact_unavailable", err.Error())
+			return
+		}
+		jsonResult(w, 200, map[string]any{"opened": true, "url": "/#/compact", "message": map[string]string{"entry": "已显示桌面便签入口", "compact": "已打开桌面便签"}[p[1]]})
+		return
+	}
+	if kind == "import-template.xlsx" && len(p) == 1 && r.Method == "GET" {
+		s.importTemplate(w, r)
+		return
+	}
 	if len(p) == 3 && p[2] == "history" && r.Method == "GET" {
 		s.history(w, r, kind, p[1])
 		return
@@ -266,7 +335,7 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
-	case "projects", "tasks", "records", "issues", "worklogs":
+	case "projects", "tasks", "records", "issues", "worklogs", "meeting_minutes":
 		if r.Method == "POST" && ((kind == "tasks" && len(p) == 2 && p[1] == "batch") || (kind == "tasks" && len(p) == 3 && (p[2] == "move" || p[2] == "reopen")) || (kind == "records" && len(p) == 2 && p[1] == "batch-classify")) {
 			input, ok := body(w, r)
 			if !ok {
