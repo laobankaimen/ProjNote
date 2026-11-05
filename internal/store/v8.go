@@ -245,6 +245,15 @@ func jsonEqual(a, b any) bool {
 	return string(x) == string(y)
 }
 func (s *Store) ComparePlanVersions(pid, fromID, toID string) (map[string]any, error) {
+	return s.comparePlanVersions(pid, fromID, toID, false)
+}
+
+// CapturePlanComparison freezes both complete planning snapshots and their
+// comparison within the same transaction, including when the target is current.
+func (s *Store) CapturePlanComparison(pid, fromID, toID string) (map[string]any, error) {
+	return s.comparePlanVersions(pid, fromID, toID, true)
+}
+func (s *Store) comparePlanVersions(pid, fromID, toID string, includeSnapshots bool) (map[string]any, error) {
 	s.Mu.RLock()
 	defer s.Mu.RUnlock()
 	tx, err := s.DB.Begin()
@@ -320,7 +329,12 @@ func (s *Store) ComparePlanVersions(pid, fromID, toID string) (map[string]any, e
 			removed = append(removed, t)
 		}
 	}
-	return map[string]any{"project_id": pid, "from": planMeta(from, false), "to": planMeta(to, toID == ""), "summary": map[string]any{"added": len(added), "removed": len(removed), "changed": len(changed), "moved": moved, "reordered": reordered, "total": len(added) + len(removed) + len(changed)}, "added": added, "removed": removed, "changed": changed}, nil
+	result := map[string]any{"project_id": pid, "from": planMeta(from, false), "to": planMeta(to, toID == ""), "summary": map[string]any{"added": len(added), "removed": len(removed), "changed": len(changed), "moved": moved, "reordered": reordered, "total": len(added) + len(removed) + len(changed)}, "added": added, "removed": removed, "changed": changed}
+	if includeSnapshots {
+		result["from_snapshot"] = from["snapshot"]
+		result["to_snapshot"] = to["snapshot"]
+	}
+	return result, nil
 }
 
 var requirementFields = strings.Fields("title description acceptance_criteria owner source status acceptance_note change_note")

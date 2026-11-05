@@ -29,7 +29,7 @@ import (
 	"projnote/internal/store"
 )
 
-var version = "0.4.0-dev"
+var version = "0.5.0-dev"
 
 type runtimeInfo struct {
 	URL      string `json:"url"`
@@ -77,6 +77,8 @@ func run() (runErr error) {
 	verify := flag.String("verify-backup", "", "校验完整 ZIP 的全部文件哈希与数据库，不覆盖数据")
 	relocate := flag.String("relocate", "", "停服后复制数据到新的空目录，原目录保留")
 	foreground := flag.Bool("foreground", false, "在前台运行服务（Linux 调试和终端运维）")
+	lan := flag.Bool("lan", false, "显式启用独立 HTTPS 局域网协同（默认关闭；设置可保存启停状态）")
+	lanPort := flag.Int("lan-port", server.DefaultLANPort, "局域网 HTTPS 端口，独立于本机负责人端口")
 	stop := flag.Bool("stop", false, "结束此数据目录正在运行的服务")
 	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
 		if errors.Is(err, flag.ErrHelp) {
@@ -86,6 +88,18 @@ func run() (runErr error) {
 	}
 	if flag.NArg() != 0 {
 		return errors.New("未知参数：" + flag.Arg(0))
+	}
+	explicitLAN, explicitLANPort := false, false
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "lan" {
+			explicitLAN = true
+		}
+		if f.Name == "lan-port" {
+			explicitLANPort = true
+		}
+	})
+	if explicitLANPort && (*lanPort < 1024 || *lanPort > 65436) {
+		return errors.New("局域网端口需介于 1024 和 65436 之间")
 	}
 	if err := validateStartupFlags(*compact, *browser, *noBrowser, *noDesktop); err != nil {
 		return err
@@ -141,6 +155,15 @@ func run() (runErr error) {
 			}
 		}()
 		fmt.Println("ProjNote 已在运行：", info.URL)
+		if explicitLAN {
+			selectedPort := *lanPort
+			if !explicitLANPort {
+				selectedPort = existingLANPort(info.URL)
+			}
+			if e = requestExistingLAN(info.URL, *lan, selectedPort); e != nil {
+				return e
+			}
+		}
 		if *compact {
 			return requestExistingCompact(info.URL)
 		}
@@ -215,6 +238,14 @@ func run() (runErr error) {
 	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 5 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	manager := newBackupManager(dataDir, st)
 	app := &server.Server{Backup: manager, Store: st, DataDir: dataDir, Host: host, Version: version, RuntimeToken: info.Instance, Shutdown: cancel}
+	lanRuntime := server.NewLANRuntime(dataDir, info.URL, app.LANHandler(), st.RevokeAllLANSessions)
+	app.StartLAN, app.StopLAN, app.LANInfo = lanRuntime.Start, lanRuntime.Stop, lanRuntime.Info
+	app.RenewLANCertificate = lanRuntime.RenewCertificate
+	defer func() {
+		if err := lanRuntime.Close(); err != nil {
+			slog.Error("LAN shutdown failed", "error", err)
+		}
+	}()
 	var compactMu sync.Mutex
 	var compactEntry io.Closer
 	ensureCompact := func(expand bool) error {
@@ -286,6 +317,9 @@ func run() (runErr error) {
 	go func() {
 		defer wg.Done()
 		<-ctx.Done()
+		if err := lanRuntime.Close(); err != nil {
+			slog.Error("LAN shutdown failed", "error", err)
+		}
 		shutdownCtx, done := context.WithTimeout(context.Background(), 15*time.Second)
 		defer done()
 		if err := srv.Shutdown(shutdownCtx); err != nil {
@@ -296,6 +330,31 @@ func run() (runErr error) {
 	settings, e := st.Settings()
 	if e != nil {
 		return e
+	}
+	lanStartup := selectLANStartup(*lan, *lanPort, explicitLAN, explicitLANPort, settings)
+	if lanStartup.enabled {
+		if result, lanErr := lanRuntime.Start(lanStartup.port); lanErr != nil {
+			slog.Error("LAN unavailable", "error", lanErr)
+			startupNotice = "局域网协同未启动：" + lanErr.Error()
+			fmt.Println("局域网协同未启动：", lanErr)
+			presentStartupFailure("局域网协同未启动：" + lanErr.Error() + "\n本机负责人服务仍在运行：" + info.URL)
+		} else {
+			if lanStartup.persist {
+				if err := st.SetSettings(map[string]any{"lan_enabled": "1", "lan_port": strconv.Itoa(lanStartup.port)}); err != nil {
+					_ = lanRuntime.Stop()
+					slog.Error("LAN preference save failed", "error", err)
+					startupNotice = "局域网协同设置未能保存，监听已关闭：" + err.Error()
+					fmt.Println("局域网协同设置未能保存，监听已关闭：", err)
+				}
+			}
+			if result["running"] == true && lanRuntime.Info()["running"] == true {
+				fmt.Printf("局域网 HTTPS：%v\n证书 SHA-256：%v\n首次连接请在本机设置下载并信任证书，核对指纹后配对。\n", result["addresses"], result["certificate_sha256"])
+			}
+		}
+	} else if lanStartup.persist {
+		if err := st.SetSettings(map[string]any{"lan_enabled": "0", "lan_port": strconv.Itoa(lanStartup.port)}); err != nil {
+			slog.Error("LAN preference save failed", "error", err)
+		}
 	}
 	startup := desktopStartup(*compact, *browser, *noBrowser, *noDesktop, fmt.Sprint(settings["desktop_default"]))
 	if startup.desktop {
@@ -462,6 +521,10 @@ func restoreOffline(root, archive string) error {
 	restored, err := store.Open(root)
 	if err != nil {
 		return err
+	}
+	if err = restored.RevokeAllLANSessions(); err != nil {
+		_ = restored.Close()
+		return fmt.Errorf("恢复后撤销旧局域网会话失败，请保持停服并重试: %w", err)
 	}
 	err = restored.RecordEvent("restore", "system", m.CreatedAt, map[string]any{"backup_created_at": m.CreatedAt, "files": len(m.Files)})
 	closeErr := restored.Close()

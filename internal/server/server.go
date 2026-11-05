@@ -24,20 +24,24 @@ import (
 )
 
 type Server struct {
-	Store            *store.Store
-	DataDir          string
-	Host             string
-	Version          string
-	RuntimeToken     string
-	Shutdown         func()
-	Backup           *backup.Manager
-	backupOnce       sync.Once
-	importOnce       sync.Once
-	importSecret     []byte
-	OpenCompact      func() error
-	OpenCompactEntry func() error
-	exports          exportRuntime
-	exportWorker     sync.Mutex
+	Store               *store.Store
+	DataDir             string
+	Host                string
+	Version             string
+	RuntimeToken        string
+	Shutdown            func()
+	Backup              *backup.Manager
+	backupOnce          sync.Once
+	importOnce          sync.Once
+	importSecret        []byte
+	OpenCompact         func() error
+	OpenCompactEntry    func() error
+	StartLAN            func(int) (map[string]any, error)
+	StopLAN             func() error
+	LANInfo             func() map[string]any
+	RenewLANCertificate func() (map[string]any, error)
+	exports             exportRuntime
+	exportWorker        sync.Mutex
 }
 
 func (s *Server) Handler() http.Handler {
@@ -131,9 +135,21 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	if kind == "meeting-minutes" {
 		kind = "meeting_minutes"
 	}
+	if kind == "lan" {
+		s.lanOwnerAPI(w, r, p)
+		return
+	}
 	if kind == "export-print.js" && len(p) == 1 && r.Method == "GET" {
 		w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
 		_, _ = io.WriteString(w, `"use strict";const button=document.getElementById("print-report");if(button){button.disabled=false;button.addEventListener("click",()=>window.print());}`)
+		return
+	}
+	if kind == "export-storage" {
+		s.exportsStorageAPI(w, r, p)
+		return
+	}
+	if kind == "export-jobs" && len(p) == 3 && p[2] == "regenerate" && r.Method == "POST" {
+		s.regenerateExport(w, r, p[1])
 		return
 	}
 	if kind == "export-jobs" || kind == "export-templates" {
@@ -164,6 +180,16 @@ func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	}
 	if kind == "requirements" && len(p) >= 3 && p[2] == "revisions" {
 		s.requirementRevisionsAPI(w, r, p)
+		return
+	}
+	if kind == "projects" && len(p) == 4 && p[2] == "requirements" && p[3] == "coverage" && r.Method == "GET" {
+		result, err := s.Store.RequirementCoverage(p[1], filtersOf(r))
+		resourceResult(w, result, err, 200)
+		return
+	}
+	if kind == "tasks" && len(p) == 3 && p[2] == "requirements" && r.Method == "GET" {
+		result, err := s.Store.TaskRequirements(p[1], filtersOf(r))
+		resourceResult(w, result, err, 200)
 		return
 	}
 	if kind == "projects" && len(p) >= 3 && p[2] == "import" {

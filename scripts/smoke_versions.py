@@ -16,6 +16,8 @@ from smoke_v032 import completed_job, digest, export_job, read_docx
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary')
+    parser.add_argument('--expected-version', default='0.5.0')
+    parser.add_argument('--expected-schema',type=int,default=9)
     args = parser.parse_args()
     binary = str(Path(args.binary).resolve(strict=True))
     with tempfile.TemporaryDirectory(prefix='projnote-versions-') as tmp:
@@ -27,7 +29,7 @@ def main():
         restored = BinaryServer(binary, root / '恢复 中文目录', port)
         try:
             server.start()
-            assert server.api('GET', '/api/health')['version'].startswith('0.4.0')
+            assert server.api('GET', '/api/health')['version'].startswith(args.expected_version)
             server.api('PUT', '/api/settings', {'operator':'版本验收人', 'backup_auto':'0'})
             p = server.api('POST', '/api/projects', {'name':'设备接口计划'}, 201)
             pid = p['id']
@@ -100,7 +102,7 @@ def main():
             filename = root / '完整版本备份.zip'
             filename.write_bytes(server.download('/api/backups/' + backup['name'] + '/download'))
             with zipfile.ZipFile(filename) as archive:
-                assert int.from_bytes(archive.read('app.db')[60:64], 'big') == 8
+                assert int.from_bytes(archive.read('app.db')[60:64], 'big') == args.expected_schema
             server.stop()
             assert '校验通过' in restored.cli('--verify-backup',filename).stdout
             assert '恢复完成' in restored.cli('--restore',filename).stdout
@@ -116,7 +118,7 @@ def main():
             completed_job(restored,export_job(restored,'requirements',req,'docx'))
             assert restored.api('GET','/api/audit/verify')['ok']
             restored.stop()
-            print('PASS: complete 53-task plans/compare/frozen snapshots, explicit requirement revisions/acceptance/task links, 10 exports, restart and schema8 backup/restore/re-export with drafts')
+            print('PASS: complete 53-task plans/compare/frozen snapshots, explicit requirement revisions/acceptance/task links, 10 exports, restart and full backup/restore/re-export with drafts')
         finally:
             server.cleanup()
             restored.cleanup()

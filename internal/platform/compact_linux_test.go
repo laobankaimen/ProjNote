@@ -75,7 +75,7 @@ func TestCompactNativeLifecycle(t *testing.T) {
 	if err := ShowCompact(entry); err != nil {
 		t.Fatal(err)
 	}
-	wait(func(s map[string]any) bool { return s["visible"] == true && s["task_count"] == float64(1) })
+	ownedPanel := wait(func(s map[string]any) bool { return s["visible"] == true && s["task_count"] == float64(1) })
 	mock.mu.Lock()
 	loadsBefore, writesBefore := mock.draftLoads, mock.draftWrites
 	mock.mu.Unlock()
@@ -94,7 +94,7 @@ func TestCompactNativeLifecycle(t *testing.T) {
 	}
 	var output []byte
 	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
-		output, err = exec.Command("xwininfo", "-name", "ProjNote 便签").CombinedOutput()
+		output, err = exec.Command("xwininfo", "-id", fmt.Sprintf("0x%x", int64(ownedPanel["panel_xid"].(float64)))).CombinedOutput()
 		if err == nil && strings.Contains(string(output), "IsViewable") {
 			break
 		}

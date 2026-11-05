@@ -390,3 +390,27 @@ func TestSchemaEightRejectsRevisionGapEvenWhenCountMatchesCurrent(t *testing.T) 
 		t.Fatal("non-contiguous requirement revisions accepted")
 	}
 }
+
+func TestSchemaNineSnapshotRequiresLANIdentityAndDailyTables(t *testing.T) {
+	for _, corrupt := range []string{"DROP TABLE lan_member_tasks", "DROP TABLE lan_sessions", "ALTER TABLE lan_daily_entries DROP COLUMN member_name"} {
+		t.Run(corrupt, func(t *testing.T) {
+			root := t.TempDir()
+			st, err := store.Open(root)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer st.Close()
+			if _, err = st.DB.Exec(corrupt); err != nil {
+				t.Fatal(err)
+			}
+			archive, err := Create(root, st.DB)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if stage, _, err := Extract(filepath.Join(root, "backups", archive.Name), t.TempDir()); err == nil {
+				os.RemoveAll(stage)
+				t.Fatal("incomplete LAN backup accepted")
+			}
+		})
+	}
+}

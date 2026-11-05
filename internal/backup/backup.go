@@ -396,6 +396,29 @@ func Extract(archive, parent string) (string, Manifest, error) {
 			}
 		}
 
+		if err == nil && version >= 9 {
+			for _, spec := range []struct {
+				table, fields string
+				count         int
+			}{
+				{"lan_members", "'id','name','enabled','auth_version','created_at','updated_at','version'", 7},
+				{"lan_member_projects", "'member_id','project_id'", 2},
+				{"lan_member_tasks", "'task_id','member_id'", 2},
+				{"lan_pairings", "'hash','member_id','auth_version','expires_at','created_at'", 5},
+				{"lan_sessions", "'hash','member_id','auth_version','device','expires_at','created_at'", 6},
+				{"lan_daily_entries", "'id','member_id','member_name','project_id','work_date','content','next_plan','blockers','minutes','created_at','updated_at','version'", 12},
+			} {
+				var count int
+				err = db.QueryRow("SELECT count(*) FROM pragma_table_info('" + spec.table + "') WHERE name IN (" + spec.fields + ")").Scan(&count)
+				if err == nil && count != spec.count {
+					err = errors.New("备份缺少局域网协同必需字段：" + spec.table)
+				}
+				if err != nil {
+					break
+				}
+			}
+		}
+
 	}
 	cerr := db.Close()
 	if err == nil {

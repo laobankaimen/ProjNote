@@ -15,6 +15,7 @@ func shouldDetachDesktop(goos string, display bool, options desktopBackgroundOpt
 }
 
 var startupLogRoot string
+var startupNotice string
 
 // Startup diagnostics never include runtime.json or the instance token. Keep
 // seven daily files, with at most one rotated predecessor per day.

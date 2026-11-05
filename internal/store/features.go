@@ -72,6 +72,9 @@ type taskNode struct {
 }
 
 func recalculate(tx *sql.Tx, projectID, changedID string) error {
+	return recalculateAs(tx, projectID, changedID, "")
+}
+func recalculateAs(tx *sql.Tx, projectID, changedID, actor string) error {
 	rows, err := tx.Query("SELECT * FROM tasks WHERE project_id=? AND deleted_at='' ORDER BY sort_order,id", projectID)
 	if err != nil {
 		return err
@@ -216,7 +219,7 @@ func recalculate(tx *sql.Tx, projectID, changedID string) error {
 				if err = searchSync(tx, "tasks", after); err != nil {
 					return err
 				}
-				if err = audit(tx, "tasks", text(n.m["id"]), "rollup", before, after); err != nil {
+				if err = auditAs(tx, actor, "tasks", text(n.m["id"]), "rollup", before, after); err != nil {
 					return err
 				}
 			}

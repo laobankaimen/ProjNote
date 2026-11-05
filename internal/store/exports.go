@@ -14,7 +14,7 @@ import (
 
 func exportKind(kind string) (string, error) {
 	kind = strings.ReplaceAll(kind, "-", "_")
-	if !oneOf(kind, "worklogs", "project_daily_logs", "issues", "meeting_minutes", "requirements", "plan_versions") {
+	if !oneOf(kind, "worklogs", "project_daily_logs", "issues", "meeting_minutes", "requirements", "plan_versions", "requirement_revisions", "plan_comparisons") {
 		return "", invalid("请选择已保存的日志、会议纪要、问题、需求或计划版本")
 	}
 	return kind, nil
@@ -23,6 +23,35 @@ func exportSnapshot(q queryer, kind, id string) (map[string]any, error) {
 	kind, err := exportKind(kind)
 	if err != nil {
 		return nil, err
+	}
+	if kind == "plan_comparisons" {
+		return nil, invalid("计划比较须从比较结果创建导出")
+	}
+	if kind == "requirement_revisions" {
+		parts := strings.Split(id, ":")
+		if len(parts) != 2 {
+			return nil, invalid("需求历史版本标识无效")
+		}
+		n, e := strconv.Atoi(parts[1])
+		if e != nil || n < 1 {
+			return nil, invalid("需求历史版本标识无效")
+		}
+		revision, e := requirementRevision(q, parts[0], n)
+		if e != nil {
+			return nil, e
+		}
+		entity := revision["snapshot"].(map[string]any)
+		project, e := getIncludingTrash(q, "projects", text(entity["project_id"]), true)
+		if e != nil {
+			return nil, e
+		}
+		name := text(project["name"])
+		rows := []map[string]any{}
+		for _, field := range []struct{ key, label string }{{"code", "需求编号"}, {"revision", "需求修订"}, {"title", "需求标题"}, {"owner", "负责人"}, {"status", "状态"}, {"acceptance_criteria", "验收准则"}, {"acceptance_note", "验收说明"}} {
+			rows = append(rows, map[string]any{"key": field.key, "label": field.label, "value": entity[field.key]})
+		}
+		rows = append(rows, map[string]any{"key": "revision_hash", "label": "修订 SHA-256", "value": revision["hash"]})
+		return map[string]any{"snapshot_format": 1, "source_kind": kind, "source_id": id, "source_version": 1, "title": text(entity["code"]) + " · " + text(entity["title"]) + " · 修订 " + strconv.Itoa(n), "content": requirementExportContent(entity, name), "project_id": text(entity["project_id"]), "project_name": name, "project": project, "person_name": text(entity["owner"]), "entered_by": revision["created_by"], "export_operator": operator(q), "log_date": strings.SplitN(text(revision["created_at"]), "T", 2)[0], "scope": "需求历史修订", "fields": entity, "source_snapshot": revision, "rows": rows, "captured_at": now()}, nil
 	}
 	var entity map[string]any
 	if kind == "plan_versions" {
@@ -92,20 +121,7 @@ func exportSnapshot(q queryer, kind, id string) (map[string]any, error) {
 		title = text(entity["code"]) + " · " + text(entity["title"])
 		person = text(entity["owner"])
 		date = strings.SplitN(text(entity["updated_at"]), "T", 2)[0]
-		var b strings.Builder
-		fmt.Fprintf(&b, "# %s\n\n项目：%s\n需求版本：%s\n负责人：%s\n状态：%s\n", title, projectName, text(entity["revision"]), person, map[string]string{"pending": "待确认", "doing": "执行中", "accepted": "已验收", "void": "已作废"}[text(entity["status"])])
-		for _, field := range []struct{ key, label string }{{"description", "需求描述"}, {"acceptance_criteria", "验收准则"}, {"source", "需求来源"}, {"acceptance_note", "验收说明"}, {"change_note", "本次变更说明"}} {
-			fmt.Fprintf(&b, "\n## %s\n\n%s\n", field.label, text(entity[field.key]))
-		}
-		b.WriteString("\n## 关联任务\n\n")
-		for _, task := range exportObjects(entity["linked_tasks"]) {
-			recycled := ""
-			if nonempty(task["deleted_at"]) {
-				recycled = "（已回收）"
-			}
-			fmt.Fprintf(&b, "- %s %s%s（任务 ID：%s）\n", text(task["wbs_code"]), text(task["name"]), recycled, text(task["id"]))
-		}
-		content = b.String()
+		content = requirementExportContent(entity, projectName)
 	}
 	if kind == "plan_versions" {
 		scope = "项目计划版本"
@@ -497,4 +513,68 @@ func exportObjects(value any) []map[string]any {
 		return out
 	}
 	return nil
+}
+
+func requirementExportContent(entity map[string]any, projectName string) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "# %s · %s\n\n项目：%s\n需求版本：%s\n负责人：%s\n状态：%s\n", text(entity["code"]), text(entity["title"]), projectName, text(entity["revision"]), text(entity["owner"]), map[string]string{"pending": "待处理", "doing": "进行中", "accepted": "已验收", "void": "已作废"}[text(entity["status"])])
+	for _, field := range []struct{ key, label string }{{"description", "需求描述"}, {"acceptance_criteria", "验收准则"}, {"source", "需求来源"}, {"acceptance_note", "验收说明"}, {"change_note", "本次变更说明"}} {
+		fmt.Fprintf(&b, "\n## %s\n\n%s\n", field.label, text(entity[field.key]))
+	}
+	b.WriteString("\n## 关联任务\n\n")
+	for _, task := range exportObjects(entity["linked_tasks"]) {
+		marker := ""
+		if nonempty(task["deleted_at"]) {
+			marker = "（已回收）"
+		}
+		fmt.Fprintf(&b, "- %s %s%s（任务 ID：%s）\n", text(task["wbs_code"]), text(task["name"]), marker, text(task["id"]))
+	}
+	return b.String()
+}
+
+// CreateFrozenExportJob accepts a server-owned snapshot. It is never exposed
+// as a client-provided JSON snapshot field in the HTTP API.
+func (s *Store) CreateFrozenExportJob(input, snapshot map[string]any) (map[string]any, error) {
+	return s.write(func(tx *sql.Tx) (map[string]any, error) {
+		format, err := inputText(input, "format", 10, false)
+		if err != nil || !oneOf(format, "docx", "md", "json", "xlsx", "html") {
+			return nil, invalid("导出格式无效")
+		}
+		kind, err := exportKind(text(snapshot["source_kind"]))
+		if err != nil {
+			return nil, err
+		}
+		id := text(snapshot["source_id"])
+		if id == "" || versionOf(snapshot["source_version"]) < 1 {
+			return nil, invalid("导出来源快照无效")
+		}
+		template, err := inputText(input, "template_id", 200, false)
+		if err != nil {
+			return nil, err
+		}
+		hash, err := inputText(input, "template_hash", 64, false)
+		if err != nil || !shaValid(hash) {
+			return nil, invalid("导出模板哈希无效")
+		}
+		if strings.ContainsFunc(template, unicode.IsControl) {
+			return nil, invalid("模板标识含无效字符")
+		}
+		raw, err := json.Marshal(snapshot)
+		if err != nil {
+			return nil, err
+		}
+		jobID, at := uid(), now()
+		_, err = tx.Exec("INSERT INTO export_jobs(id,state,format,source_kind,source_id,source_version,template_id,template_hash,source_snapshot,created_at,updated_at)VALUES(?,'queued',?,?,?,?,?,?,?,?,?)", jobID, format, kind, id, snapshot["source_version"], template, hash, string(raw), at, at)
+		if err != nil {
+			return nil, err
+		}
+		made, err := job(tx, jobID)
+		if err != nil {
+			return nil, err
+		}
+		if err = audit(tx, "export_jobs", jobID, "create", nil, made); err != nil {
+			return nil, err
+		}
+		return made, nil
+	})
 }

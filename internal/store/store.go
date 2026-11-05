@@ -19,7 +19,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 8
+const SchemaVersion = 9
 
 type AppError struct {
 	Code    string
@@ -132,7 +132,7 @@ func migrateAfter(tx *sql.Tx, version int) error {
 	for _, step := range []struct {
 		version int
 		apply   func(*sql.Tx) error
-	}{{2, migrateV2}, {3, migrateV3}, {4, migrateV4}, {5, migrateV5}, {6, migrateV6}, {7, migrateV7}, {8, migrateV8}} {
+	}{{2, migrateV2}, {3, migrateV3}, {4, migrateV4}, {5, migrateV5}, {6, migrateV6}, {7, migrateV7}, {8, migrateV8}, {9, migrateV9}} {
 		if version < step.version {
 			if err := step.apply(tx); err != nil {
 				return fmt.Errorf("升级数据库至版本 %d: %w", step.version, err)
@@ -385,6 +385,12 @@ func auditHash(p auditPayload) string {
 	return hex.EncodeToString(h[:])
 }
 func audit(tx *sql.Tx, kind, id, action string, before, after any) error {
+	return auditAs(tx, "", kind, id, action, before, after)
+}
+func auditAs(tx *sql.Tx, actor, kind, id, action string, before, after any) error {
+	if actor == "" {
+		actor = operator(tx)
+	}
 	b, err := json.Marshal(before)
 	if err != nil {
 		return err
@@ -398,7 +404,7 @@ func audit(tx *sql.Tx, kind, id, action string, before, after any) error {
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return err
 	}
-	p := auditPayload{now(), operator(tx), kind, id, action, string(b), string(a), prev}
+	p := auditPayload{now(), actor, kind, id, action, string(b), string(a), prev}
 	_, err = tx.Exec("INSERT INTO audit(created_at,operator,entity_type,entity_id,action,before_json,after_json,prev_hash,hash)VALUES(?,?,?,?,?,?,?,?,?)", p.CreatedAt, p.Operator, kind, id, action, p.Before, p.After, prev, auditHash(p))
 	return err
 }
@@ -932,6 +938,9 @@ func (s *Store) Update(kind, id string, input map[string]any) (map[string]any, e
 	return m, nil
 }
 func update(tx *sql.Tx, kind, id string, input map[string]any) (map[string]any, error) {
+	return updateAs(tx, kind, id, input, "")
+}
+func updateAs(tx *sql.Tx, kind, id string, input map[string]any, actor string) (map[string]any, error) {
 	if kind == "plan_versions" {
 		return nil, immutablePlanError()
 	}
@@ -1060,12 +1069,19 @@ func update(tx *sql.Tx, kind, id string, input map[string]any) (map[string]any, 
 	if n != 1 {
 		return nil, fail("version_conflict", "内容已被修改，请刷新后重试", 409)
 	}
+	if kind == "tasks" && actor == "" {
+		if _, explicit := in["assignee"]; explicit && text(in["assignee"]) != text(before["assignee"]) {
+			if err = lanUnassignTask(tx, id); err != nil {
+				return nil, err
+			}
+		}
+	}
 	if kind == "tasks" {
-		if err = recalculate(tx, text(m["project_id"]), id); err != nil {
+		if err = recalculateAs(tx, text(m["project_id"]), id, actor); err != nil {
 			return nil, err
 		}
 		if text(m["project_id"]) != text(before["project_id"]) {
-			if err = recalculate(tx, text(before["project_id"]), id); err != nil {
+			if err = recalculateAs(tx, text(before["project_id"]), id, actor); err != nil {
 				return nil, err
 			}
 		}
@@ -1101,7 +1117,7 @@ func update(tx *sql.Tx, kind, id string, input map[string]any) (map[string]any, 
 	if err = searchSync(tx, kind, m); err != nil {
 		return nil, err
 	}
-	if err = audit(tx, kind, id, "update", before, m); err != nil {
+	if err = auditAs(tx, actor, kind, id, "update", before, m); err != nil {
 		return nil, err
 	}
 	return m, nil

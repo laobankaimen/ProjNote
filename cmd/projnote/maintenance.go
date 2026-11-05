@@ -100,6 +100,10 @@ func relocateOffline(root, target string) error {
 	if err != nil {
 		return err
 	}
+	if err = dest.RevokeAllLANSessions(); err != nil {
+		_ = dest.Close()
+		return fmt.Errorf("迁移后撤销旧局域网会话失败: %w", err)
+	}
 	err = dest.RecordEvent("relocate", "system", info.Name, map[string]any{"source_dir": root, "target_dir": target, "files": len(manifest.Files)})
 	closeErr = dest.Close()
 	if err != nil {

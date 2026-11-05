@@ -38,11 +38,17 @@ func settingValue(key string, v any) (string, error) {
 			return "", invalid("操作者必须是 1 至 80 个字符")
 		}
 		return strings.TrimSpace(str), nil
-	case "setup_completed", "backup_auto", "desktop_default":
+	case "setup_completed", "backup_auto", "desktop_default", "lan_enabled":
 		if !oneOf(v, "0", "1") {
 			return "", invalid("设置必须为 0 或 1")
 		}
 		return text(v), nil
+	case "lan_port":
+		n, e := strconv.Atoi(text(v))
+		if e != nil || n < 1024 || n > 65436 {
+			return "", invalid("局域网端口须为1024至65436")
+		}
+		return strconv.Itoa(n), nil
 	case "backup_keep_count", "backup_max_mb":
 		n, err := strconv.ParseInt(text(v), 10, 64)
 		if err != nil {
@@ -169,7 +175,7 @@ func (s *Store) SoftDelete(kind, id string, input map[string]any) (map[string]an
 		}
 		items := []map[string]any{m}
 		if kind == "projects" {
-			for _, child := range []string{"tasks", "records", "issues", "worklogs", "time_entries", "reminders", "team_daily_entries", "project_daily_logs", "meeting_minutes", "requirements", "plan_versions"} {
+			for _, child := range []string{"tasks", "records", "issues", "worklogs", "time_entries", "reminders", "team_daily_entries", "project_daily_logs", "meeting_minutes", "requirements", "plan_versions", "lan_member_projects", "lan_daily_entries"} {
 				var n int
 				if err = tx.QueryRow("SELECT count(*) FROM "+child+" WHERE project_id=?", id).Scan(&n); err != nil {
 					return nil, err

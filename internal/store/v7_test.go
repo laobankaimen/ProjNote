@@ -45,6 +45,8 @@ func TestV7MigrationFromV6PreservesDraftMonthFrozenSourceAndAudit(t *testing.T) 
 		t.Fatal(err)
 	}
 	beforeSettings, _ := old.Settings()
+	beforeSettings["lan_enabled"] = "0"
+	beforeSettings["lan_port"] = "18680"
 	var rawSnapshot, auditTail string
 	var auditCount int
 	old.DB.QueryRow("SELECT source_snapshot FROM export_jobs WHERE id=?", job["id"]).Scan(&rawSnapshot)

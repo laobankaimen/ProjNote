@@ -22,9 +22,11 @@ import (
 var exportID = regexp.MustCompile(`^[a-f0-9]{32}$`)
 
 type exportRuntime struct {
-	mu      sync.Mutex
-	wg      sync.WaitGroup
-	closing bool
+	mu sync.Mutex
+	// Lock order for artifact mutations: exportWorker, artifacts, then Store.Mu.
+	artifacts sync.Mutex
+	wg        sync.WaitGroup
+	closing   bool
 }
 
 func (s *Server) initExports() error {
@@ -144,6 +146,11 @@ func (s *Server) exportsAPI(w http.ResponseWriter, r *http.Request, p []string) 
 		return
 	}
 	if len(p) >= 2 && r.Method == "GET" {
+		// Keep the current job check and complete read together with cleanup.
+		if len(p) == 3 && (p[2] == "download" || p[2] == "print") {
+			s.exports.artifacts.Lock()
+			defer s.exports.artifacts.Unlock()
+		}
 		job, e := s.Store.GetExportJob(p[1])
 		if e != nil {
 			handleErr(w, e)
@@ -162,7 +169,7 @@ func (s *Server) exportsAPI(w http.ResponseWriter, r *http.Request, p []string) 
 				writeError(w, 409, "export_not_ready", "导出尚未完成或已失败，请查看任务状态")
 				return
 			}
-			data, e := s.artifact(job)
+			data, e := s.artifactLocked(job)
 			if e != nil {
 				_, _ = s.Store.InvalidateExportJob(p[1], map[string]any{"version": job["version"], "error": "导出结果文件缺失或哈希不符，请重新导出"})
 				writeError(w, 410, "artifact_unavailable", "结果文件缺失或校验失败，请重新导出")
@@ -183,25 +190,20 @@ func (s *Server) exportsAPI(w http.ResponseWriter, r *http.Request, p []string) 
 	writeError(w, 404, "not_found", "接口不存在或请求方法不正确")
 }
 func (s *Server) artifact(job map[string]any) ([]byte, error) {
-	id, _ := job["id"].(string)
-	format, _ := job["format"].(string)
-	name, _ := job["output_name"].(string)
-	if !exportID.MatchString(id) || name != id+"."+format {
-		return nil, errors.New("导出结果名称无效")
+	s.exports.artifacts.Lock()
+	defer s.exports.artifacts.Unlock()
+	return s.artifactLocked(job)
+}
+func (s *Server) artifactLocked(job map[string]any) ([]byte, error) {
+	name, err := exportArtifactName(job)
+	if err != nil {
+		return nil, err
 	}
-	path := filepath.Join(s.DataDir, "exports", name)
-	info, e := os.Lstat(path)
-	if e != nil || !info.Mode().IsRegular() || info.Size() > 64<<20 {
-		return nil, errors.New("导出文件不存在或无效")
+	dir, err := s.exportArtifactDir(false)
+	if err != nil {
+		return nil, err
 	}
-	b, e := os.ReadFile(path)
-	if e != nil {
-		return nil, e
-	}
-	if exporter.Digest(b) != job["output_sha256"] {
-		return nil, errors.New("导出文件哈希不一致")
-	}
-	return b, nil
+	return readExportArtifact(filepath.Join(dir, name), job)
 }
 func (s *Server) runExport(job map[string]any, template []byte) {
 	s.exportWorker.Lock()
@@ -246,8 +248,10 @@ func (s *Server) runExport(job map[string]any, template []byte) {
 		fail(errors.New("导出结果超过64MB"))
 		return
 	}
-	dir := filepath.Join(s.DataDir, "exports")
-	if e = os.MkdirAll(dir, 0700); e != nil {
+	s.exports.artifacts.Lock()
+	defer s.exports.artifacts.Unlock()
+	dir, e := s.exportArtifactDir(true)
+	if e != nil {
 		fail(e)
 		return
 	}

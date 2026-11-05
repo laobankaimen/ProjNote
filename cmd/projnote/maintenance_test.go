@@ -89,3 +89,56 @@ func openLegacyFixture(root string) (*sql.DB, error) {
 	_, err = db.Exec("CREATE TABLE projects(id TEXT PRIMARY KEY); PRAGMA user_version=1;")
 	return db, err
 }
+
+func TestRestoreClearsBackedUpLANSessionsAndPairingCodes(t *testing.T) {
+	root := t.TempDir()
+	st, err := store.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	member, err := st.CreateLANMember(map[string]any{"name": "恢复验证成员"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pair, err := st.CreateLANPairing(member["id"].(string), map[string]any{"version": member["version"]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	session, err := st.ExchangeLANPairing(pair["code"].(string), "restore-fixture")
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending, err := st.CreateLANPairing(member["id"].(string), map[string]any{"version": member["version"]})
+	if err != nil {
+		t.Fatal(err)
+	}
+	point, err := backup.Create(root, st.DB)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err = restoreOffline(root, filepath.Join(root, "backups", point.Name)); err != nil {
+		t.Fatal(err)
+	}
+	restored, err := store.Open(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Close()
+	if _, err = restored.LANSession(session["token"].(string)); err == nil {
+		t.Fatal("restore revived an old LAN session")
+	}
+	if _, err = restored.ExchangeLANPairing(pending["code"].(string), "restored-client"); err == nil {
+		t.Fatal("restore revived an unconsumed pairing code")
+	}
+	members, err := restored.ListLANMembers(nil)
+	if err != nil || members["total"] != 1 {
+		t.Fatal("restore removed the member identity", members, err)
+	}
+	audit, err := restored.VerifyAudit()
+	if err != nil || audit["ok"] != true {
+		t.Fatal(audit, err)
+	}
+}

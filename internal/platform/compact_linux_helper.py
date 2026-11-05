@@ -608,6 +608,7 @@ def test_action(command):
                     "task_view_height": tasks_scroll.get_allocated_height(), "task_row_heights": [child.get_allocated_height() for child in tasks.get_children()],
                     "entry_geometry": {"x": ex, "y": ey, "width": ew, "height": eh},
                     "panel_geometry": {name: getattr(panel_frame, name) for name in ("x", "y", "width", "height")} if panel_frame else {"x": px, "y": py, "width": pw, "height": ph},
+                    "panel_xid": int(panel.get_window().get_xid()) if panel.get_window() else 0,
                     "panel_origin": list(panel_origin) if panel_origin else None,
                     "panel_frame": {name: getattr(panel_frame, name) for name in ("x", "y", "width", "height")} if panel_frame else None,
                     "workarea": {name: getattr(area, name) for name in ("x", "y", "width", "height")}}

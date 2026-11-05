@@ -74,6 +74,8 @@ func TestV8MigrationPreservesV7DataDraftSearchFrozenExportAndAudit(t *testing.T)
 	old.DB.QueryRow("SELECT hash FROM audit ORDER BY id DESC LIMIT 1").Scan(&hash)
 	count := sqlCount(t, old, "audit")
 	settings, _ := old.Settings()
+	settings["lan_enabled"] = "0"
+	settings["lan_port"] = "18680"
 	old.Close()
 	s, e := Open(root)
 	if e != nil {
@@ -82,7 +84,7 @@ func TestV8MigrationPreservesV7DataDraftSearchFrozenExportAndAudit(t *testing.T)
 	defer s.Close()
 	var schema int
 	s.DB.QueryRow("PRAGMA user_version").Scan(&schema)
-	if schema != 8 {
+	if schema != SchemaVersion {
 		t.Fatal(schema)
 	}
 	for _, pair := range []struct {

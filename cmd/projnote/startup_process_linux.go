@@ -19,8 +19,9 @@ const desktopChildPipeEnv = "PROJNOTE_INTERNAL_READY_FD"
 var desktopReadyPipe *os.File
 
 type desktopReadyMessage struct {
-	URL   string `json:"url,omitempty"`
-	Error string `json:"error,omitempty"`
+	URL    string `json:"url,omitempty"`
+	Error  string `json:"error,omitempty"`
+	Notice string `json:"notice,omitempty"`
 }
 
 func prepareDesktopProcess() error {
@@ -46,7 +47,7 @@ func desktopServiceReady(base string) {
 	if desktopReadyPipe == nil {
 		return
 	}
-	_ = json.NewEncoder(desktopReadyPipe).Encode(desktopReadyMessage{URL: base})
+	_ = json.NewEncoder(desktopReadyPipe).Encode(desktopReadyMessage{URL: base, Notice: startupNotice})
 	_ = desktopReadyPipe.Close()
 	desktopReadyPipe = nil
 }
@@ -76,6 +77,9 @@ func startDesktopBackground(root string, options desktopBackgroundOptions) (bool
 		return true, err
 	}
 	fmt.Printf("ProjNote 已在后台运行。\n本机地址：%s\n诊断日志：%s/logs\n关闭便签或终端不会退出服务；退出请在设置操作或使用 --stop。\n", message.URL, root)
+	if message.Notice != "" {
+		fmt.Println("启动提示：", message.Notice)
+	}
 	return true, nil
 }
 func launchDetachedDesktop(executable string, args, env []string, root string, timeout time.Duration) (desktopReadyMessage, error) {

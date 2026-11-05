@@ -223,7 +223,21 @@ func projectDailyDraft(q queryer, projectID, date string) (map[string]any, error
 	for _, m := range times {
 		normalize("time_entries", m)
 	}
-	rows, err = q.Query("SELECT id,project_id,parent_id,wbs_code,name,assignee,status,progress,version,updated_at,sort_order FROM tasks WHERE project_id=? AND deleted_at='' ORDER BY sort_order,id", projectID)
+	taskSQL := "SELECT id,project_id,parent_id,wbs_code,name,assignee,status,progress,version,updated_at,sort_order FROM tasks WHERE project_id=? AND deleted_at='' ORDER BY sort_order,id"
+	var lanTable int
+	if err = q.QueryRow("SELECT count(*) FROM sqlite_master WHERE type='table' AND name='lan_member_tasks'").Scan(&lanTable); err != nil {
+		return nil, err
+	}
+	if lanTable > 0 {
+		var assigned int
+		if err = q.QueryRow("SELECT count(*) FROM lan_member_tasks a JOIN tasks t ON t.id=a.task_id WHERE t.project_id=?", projectID).Scan(&assigned); err != nil {
+			return nil, err
+		}
+		if assigned > 0 {
+			taskSQL = "SELECT t.id,t.project_id,t.parent_id,t.wbs_code,t.name,t.assignee,t.status,t.progress,t.version,t.updated_at,t.sort_order,COALESCE(a.member_id,'') AS lan_member_id FROM tasks t LEFT JOIN lan_member_tasks a ON a.task_id=t.id WHERE t.project_id=? AND t.deleted_at='' ORDER BY t.sort_order,t.id"
+		}
+	}
+	rows, err = q.Query(taskSQL, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -251,6 +265,9 @@ func projectDailyDraft(q queryer, projectID, date string) (map[string]any, error
 		totalMinutes += int(num(m["minutes"]))
 	}
 	for _, m := range tasks {
+		if nonempty(m["lan_member_id"]) {
+			continue
+		}
 		name := strings.TrimSpace(text(m["assignee"]))
 		if name == "" {
 			continue
@@ -318,6 +335,16 @@ func projectDailyDraft(q queryer, projectID, date string) (map[string]any, error
 		}
 	}
 	snapshot := map[string]any{"format": 1, "project": map[string]any{"id": project["id"], "version": project["version"], "name": project["name"]}, "log_date": date, "generated_at": now(), "team_entries": entries, "time_entries": times, "tasks": tasks, "task_snapshot_semantics": "生成时的当前任务状态，并非日志日期当天的历史状态", "people": groups, "expected_people": expectedNames, "missing_people": missing, "total_minutes": totalMinutes}
+	if err = projectDailyLAN(q, projectID, date, snapshot, &content); err != nil {
+		return nil, err
+	}
+	if combined := int(num(snapshot["total_minutes"])); combined != totalMinutes {
+		old := fmt.Sprintf("- 合计 %d 分钟（%.2f 小时）", totalMinutes, float64(totalMinutes)/60)
+		new := fmt.Sprintf("- 合计 %d 分钟（%.2f 小时，单机工时条目与成员日报工时各计一次）", combined, float64(combined)/60)
+		body := strings.Replace(content.String(), old, new, 1)
+		content.Reset()
+		content.WriteString(body)
+	}
 	return map[string]any{"project_id": projectID, "log_date": date, "content": content.String(), "source_snapshot": snapshot}, nil
 }
 func (s *Store) ProjectDailyLog(projectID, date string) (map[string]any, error) {

@@ -17,6 +17,10 @@ func resourceResult(w http.ResponseWriter, result any, err error, status int) {
 
 func (s *Server) planVersionsAPI(w http.ResponseWriter, r *http.Request, p []string) {
 	if p[0] == "projects" && len(p) >= 3 {
+		if len(p) == 4 && p[3] == "compare-export" && r.Method == "POST" {
+			s.exportPlanComparison(w, r, p[1])
+			return
+		}
 		if len(p) == 3 {
 			switch r.Method {
 			case "GET":
