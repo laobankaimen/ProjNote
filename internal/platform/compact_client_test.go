@@ -18,15 +18,18 @@ type compactMockService struct {
 	records                                               []map[string]any
 	taskInputs                                            []map[string]any
 	createdTasks                                          []compactTask
+	todayTask                                             compactTask
+	taskUpdates                                           []map[string]any
 	projectsOverride                                      []compactProject
 	draftLoads, draftWrites, recordAttempts, projectPages int
 	failRecord, failClear, failTask                       bool
+	failDraftLoad, failComplete                           bool
 	badHeader                                             bool
 }
 
 func newCompactMockService(t *testing.T) (*compactMockService, *httptest.Server) {
 	t.Helper()
-	state := &compactMockService{draft: compactDraft{Content: "服务端已有正文草稿", Mode: "record", Version: 1}}
+	state := &compactMockService{draft: compactDraft{Content: "服务端已有正文草稿", Mode: "record", Version: 1}, todayTask: compactTask{ID: "task", Name: "原生面板今日任务", ProjectID: "last", Status: "doing", Version: 1}}
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		state.mu.Lock()
 		defer state.mu.Unlock()
@@ -50,6 +53,10 @@ func newCompactMockService(t *testing.T) (*compactMockService, *httptest.Server)
 		case "/api/desktop/draft":
 			if r.Method == "GET" {
 				state.draftLoads++
+				if state.failDraftLoad {
+					fail(503, "模拟草稿读取失败")
+					return
+				}
 				write(200, state.draft)
 				return
 			}
@@ -99,7 +106,13 @@ func newCompactMockService(t *testing.T) (*compactMockService, *httptest.Server)
 			}
 			write(200, map[string]any{"items": items, "total": total})
 		case "/api/today":
-			write(200, map[string]any{"tasks": append([]compactTask{{ID: "task", Name: "原生面板今日任务", Status: "doing"}}, state.createdTasks...)})
+			items := []compactTask{}
+			for _, task := range append([]compactTask{state.todayTask}, state.createdTasks...) {
+				if task.Status == "todo" || task.Status == "doing" {
+					items = append(items, task)
+				}
+			}
+			write(200, map[string]any{"tasks": items})
 		case "/api/settings":
 			write(200, map[string]any{"operator": "测试操作人"})
 		case "/api/tasks":
@@ -113,7 +126,7 @@ func newCompactMockService(t *testing.T) (*compactMockService, *httptest.Server)
 				return
 			}
 			state.taskInputs = append(state.taskInputs, input)
-			task := compactTask{ID: "created-" + strconv.Itoa(len(state.taskInputs)), Name: input["name"].(string), ProjectID: input["project_id"].(string), PlanEnd: input["plan_end"].(string), Status: "todo"}
+			task := compactTask{ID: "created-" + strconv.Itoa(len(state.taskInputs)), Name: input["name"].(string), ProjectID: input["project_id"].(string), PlanEnd: input["plan_end"].(string), Status: "todo", Version: 1}
 			state.createdTasks = append(state.createdTasks, task)
 			write(201, map[string]any{"id": task.ID, "name": task.Name})
 		case "/api/records":
@@ -130,6 +143,52 @@ func newCompactMockService(t *testing.T) (*compactMockService, *httptest.Server)
 			state.records = append(state.records, input)
 			write(201, map[string]any{"id": "saved-record", "content": input["content"]})
 		default:
+			if strings.HasPrefix(r.URL.Path, "/api/tasks/") {
+				id := strings.TrimPrefix(r.URL.Path, "/api/tasks/")
+				var found *compactTask
+				if state.todayTask.ID == id {
+					found = &state.todayTask
+				}
+				for i := range state.createdTasks {
+					if state.createdTasks[i].ID == id {
+						found = &state.createdTasks[i]
+					}
+				}
+				if found == nil {
+					fail(404, "任务不存在")
+					return
+				}
+				if r.Method == "GET" {
+					write(200, found)
+					return
+				}
+				var input map[string]any
+				if json.NewDecoder(r.Body).Decode(&input) != nil {
+					fail(400, "invalid")
+					return
+				}
+				state.taskUpdates = append(state.taskUpdates, input)
+				if state.failComplete || input["version"] != float64(found.Version) {
+					fail(409, "任务版本冲突")
+					return
+				}
+				found.Status = input["status"].(string)
+				found.Progress = int(input["progress"].(float64))
+				found.Version++
+				write(200, found)
+				return
+			}
+			if strings.HasPrefix(r.URL.Path, "/api/projects/") {
+				id := strings.TrimPrefix(r.URL.Path, "/api/projects/")
+				for _, p := range state.projectsOverride {
+					if p.ID == id {
+						write(200, p)
+						return
+					}
+				}
+				write(200, compactProject{ID: id, Name: "项目", Status: "active"})
+				return
+			}
 			fail(404, "unknown")
 		}
 	}))
@@ -176,7 +235,7 @@ func TestCompactNativeClientWritesAndConflicts(t *testing.T) {
 	if state.badHeader || len(state.records) != 1 || len(state.records[0]) != 2 || state.records[0]["content"] != "实际提交正文" {
 		t.Fatalf("unexpected POST: %#v", state.records)
 	}
-	if state.projectPages != 2 {
+	if state.projectPages != 4 {
 		t.Fatalf("projects truncated: %d", state.projectPages)
 	}
 	if OpenCompactWindow(server.URL) == nil {
@@ -197,6 +256,79 @@ func TestCompactNativeClientRejectsRedirectsAndUnknownActions(t *testing.T) {
 	reply := client.dispatch(context.Background(), compactRequest{Seq: 9, Action: "http://example.invalid"})
 	if reply.Error == "" || reply.Seq != 9 {
 		t.Fatal(reply)
+	}
+}
+
+func TestCompactCompleteOneTaskUsesShownVersionAndWriteGuard(t *testing.T) {
+	mock, server := newCompactMockService(t)
+	client, err := newCompactClient(server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	items, err := client.today(context.Background())
+	if err != nil || len(items) != 1 || !items[0].CanComplete {
+		t.Fatalf("task eligibility: %#v %v", items, err)
+	}
+	reply := client.dispatch(context.Background(), compactRequest{Seq: 12, Action: "complete_task", Payload: map[string]any{"id": items[0].ID, "version": items[0].Version, "path": "http://external.invalid", "project_id": "forged"}})
+	if reply.Error != "" || reply.Data.(compactTask).Status != "done" {
+		t.Fatalf("completion: %#v", reply)
+	}
+	items, err = client.today(context.Background())
+	if err != nil || len(items) != 0 {
+		t.Fatalf("completed task remained in today: %#v %v", items, err)
+	}
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	if len(mock.taskUpdates) != 1 || len(mock.taskUpdates[0]) != 3 || mock.taskUpdates[0]["version"] != float64(1) || mock.taskUpdates[0]["status"] != "done" || mock.taskUpdates[0]["progress"] != float64(100) || mock.badHeader || mock.draft.Content != "服务端已有正文草稿" {
+		t.Fatalf("unsafe completion or draft changed: %#v %#v", mock.taskUpdates, mock.draft)
+	}
+}
+
+func TestCompactCompletionRejectsStaleParentAndReadonlyWithoutRetry(t *testing.T) {
+	for _, scenario := range []string{"stale", "parent", "closed", "archived", "ended", "write_conflict", "invalid_id"} {
+		t.Run(scenario, func(t *testing.T) {
+			mock, server := newCompactMockService(t)
+			client, err := newCompactClient(server.URL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			id, version := "task", 1
+			mock.mu.Lock()
+			switch scenario {
+			case "stale":
+				mock.todayTask.Version++
+			case "parent":
+				mock.todayTask.HasChildren = true
+			case "closed", "archived":
+				mock.projectsOverride = []compactProject{{ID: "last", Status: scenario}}
+			case "ended":
+				mock.todayTask.Status = "done"
+			case "write_conflict":
+				mock.failComplete = true
+			case "invalid_id":
+				id = "../settings"
+			}
+			mock.mu.Unlock()
+			if _, err = client.completeTask(context.Background(), id, version); err == nil {
+				t.Fatal("invalid completion succeeded")
+			}
+			items, listErr := client.today(context.Background())
+			if listErr != nil {
+				t.Fatal(listErr)
+			}
+			if (scenario == "parent" || scenario == "closed" || scenario == "archived") && (len(items) != 1 || items[0].CanComplete) {
+				t.Fatalf("readonly task action enabled: %#v", items)
+			}
+			mock.mu.Lock()
+			defer mock.mu.Unlock()
+			want := 0
+			if scenario == "write_conflict" {
+				want = 1
+			}
+			if len(mock.taskUpdates) != want || mock.draft.Content != "服务端已有正文草稿" {
+				t.Fatalf("unexpected retry/write or draft mutation: %#v %#v", mock.taskUpdates, mock.draft)
+			}
+		})
 	}
 }
 

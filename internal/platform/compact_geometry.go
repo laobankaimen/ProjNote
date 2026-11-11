@@ -98,8 +98,8 @@ func (state compactViewState) entryVisible() bool { return !state.PanelVisible }
 
 // Native control rectangles are returned in physical client coordinates.
 type compactPanelLayout struct {
-	Heading, Mode, Project, Body, Save, Restore, Refresh, Status, TodayHeading, Tasks, Close, Full, Version compactGeometryRect
-	TaskRowHeight                                                                                           int32
+	Heading, Mode, Project, Body, Save, Refresh, Status, TodayHeading, Complete, Tasks, Close, Full, Version compactGeometryRect
+	TaskRowHeight                                                                                            int32
 }
 
 func compactPanelLayoutFor(width, height int32, dpi uint32) compactPanelLayout {
@@ -120,11 +120,11 @@ func compactPanelLayoutFor(width, height int32, dpi uint32) compactPanelLayout {
 		Mode:          r(s(10), s(36), s(104), s(200)),
 		Project:       r(s(122), s(36), width-s(132), s(200)),
 		Body:          r(s(10), s(70), width-s(20), bodyHeight),
-		Save:          r(s(10), buttonY, s(100), s(28)),
-		Restore:       r(s(118), buttonY, s(82), s(28)),
-		Refresh:       r(s(208), buttonY, width-s(218), s(28)),
+		Save:          r(s(10), buttonY, width-s(126), s(28)),
+		Refresh:       r(width-s(108), buttonY, s(98), s(28)),
 		Status:        r(s(12), statusY, width-s(24), s(32)),
-		TodayHeading:  r(s(12), todayY, width-s(24), s(20)),
+		TodayHeading:  r(s(12), todayY, width-s(132), s(20)),
+		Complete:      r(width-s(116), todayY-s(2), s(106), s(24)),
 		Tasks:         r(s(10), listY, width-s(20), footerY-s(8)-listY),
 		Full:          r(s(10), footerY, s(134), s(28)),
 		Version:       r(s(154), footerY+s(6), width-s(166), s(16)),

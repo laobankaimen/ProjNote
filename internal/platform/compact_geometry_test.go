@@ -69,7 +69,7 @@ func TestCompactPanelLayoutFourFullRowsAtDefaultMinimumAndDPI(t *testing.T) {
 			if layout.Body.height() < compactScale(90, dpi) || layout.Status.height() < compactScale(30, dpi) {
 				t.Fatal("editor or feedback squeezed", dpi, layout)
 			}
-			for _, r := range []compactGeometryRect{layout.Heading, layout.Body, layout.Save, layout.Restore, layout.Refresh, layout.Status, layout.TodayHeading, layout.Tasks, layout.Close, layout.Full, layout.Version} {
+			for _, r := range []compactGeometryRect{layout.Heading, layout.Body, layout.Save, layout.Refresh, layout.Status, layout.TodayHeading, layout.Complete, layout.Tasks, layout.Close, layout.Full, layout.Version} {
 				if r.Left < 0 || r.Top < 0 || r.Right > size.Width || r.Bottom > size.Height || r.width() <= 0 || r.height() <= 0 {
 					t.Fatalf("control outside client dpi%d: %+v size%+v", dpi, r, size)
 				}
@@ -77,7 +77,7 @@ func TestCompactPanelLayoutFourFullRowsAtDefaultMinimumAndDPI(t *testing.T) {
 			if layout.Heading.Right > layout.Close.Left || layout.Close.Bottom > layout.Mode.Top || layout.Body.Bottom > layout.Save.Top || layout.Save.Bottom > layout.Status.Top || layout.Status.Bottom > layout.TodayHeading.Top || layout.TodayHeading.Bottom > layout.Tasks.Top || layout.Tasks.Bottom > layout.Full.Top {
 				t.Fatal("native controls overlap", dpi, layout)
 			}
-			if layout.Save.Right > layout.Restore.Left || layout.Restore.Right > layout.Refresh.Left || layout.Full.Right > layout.Version.Left {
+			if layout.Save.Right > layout.Refresh.Left || layout.TodayHeading.Right > layout.Complete.Left || layout.Complete.Bottom > layout.Tasks.Top || layout.Full.Right > layout.Version.Left {
 				t.Fatal("action controls overlap", dpi, layout)
 			}
 		}

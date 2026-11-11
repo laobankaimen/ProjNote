@@ -410,7 +410,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("binary", nargs="?", help="path to newly compiled ProjNote")
     parser.add_argument("--binary", dest="binary_option", help="alternative explicit binary path")
-    parser.add_argument("--expected-version", default="0.5.0", help="expected binary version prefix")
+    parser.add_argument("--expected-version", default="0.5.1", help="expected binary version prefix")
     parser.add_argument("--native", action="store_true", help="observe actual Linux GTK helper/windows")
     args = parser.parse_args()
     if args.binary and args.binary_option and Path(args.binary).resolve() != Path(args.binary_option).resolve():

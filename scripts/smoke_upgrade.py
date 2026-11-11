@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify backup-before-migration ordering with real legacy and current binaries."""
+"""Verify updates preserve data, with protected backups before schema changes."""
 import argparse
 import json
 from pathlib import Path
@@ -17,7 +17,7 @@ def main():
     parser.add_argument('--legacy-schema',type=int,default=1)
     parser.add_argument('--new-schema',type=int,default=9)
     parser.add_argument('--legacy-version',default='0.1')
-    parser.add_argument('--new-version',default='0.5.0')
+    parser.add_argument('--new-version',default='0.5.1')
     args = parser.parse_args()
     legacy = str(Path(args.legacy_binary).resolve())
     current = str(Path(args.new_binary).resolve())
@@ -66,21 +66,25 @@ def main():
             assert settings['dataset_id'] and settings['gjb_level'] == '2'
             backups = api(url,'GET','/api/backups')['items']
             protected = [item for item in backups if item['protected']]
-            assert protected, backups
-            import zipfile
-            with zipfile.ZipFile(root / 'backups' / protected[0]['name']) as archive:
-                snapshot = Path(tmp) / 'pre-upgrade.db'
-                snapshot.write_bytes(archive.read('app.db'))
-            with sqlite3.connect(snapshot) as connection:
-                assert connection.execute('PRAGMA user_version').fetchone()[0] == args.legacy_schema
-                assert connection.execute('SELECT name FROM projects').fetchone()[0] == '旧版本真实项目'
+            schema_changed = args.legacy_schema < args.new_schema
+            if schema_changed:
+                assert protected, backups
+                import zipfile
+                with zipfile.ZipFile(root / 'backups' / protected[0]['name']) as archive:
+                    snapshot = Path(tmp) / 'pre-upgrade.db'
+                    snapshot.write_bytes(archive.read('app.db'))
+                with sqlite3.connect(snapshot) as connection:
+                    assert connection.execute('PRAGMA user_version').fetchone()[0] == args.legacy_schema
+                    assert connection.execute('SELECT name FROM projects').fetchone()[0] == '旧版本真实项目'
             assert api(url,'GET','/api/audit/verify')['ok']
             out = stop(current, active)
             active = None
-            assert '升级前完整备份' in out, out
+            if schema_changed:
+                assert '升级前完整备份' in out, out
             with sqlite3.connect(root / 'app.db') as connection:
                 assert connection.execute('PRAGMA user_version').fetchone()[0] == args.new_schema
-            print(f'PASS: real v{args.legacy_version}→v{args.new_version} migration, original data/audit preserved, protected pre-upgrade snapshot remains schema{args.legacy_schema}')
+            detail = f'protected pre-upgrade snapshot remains schema{args.legacy_schema}' if schema_changed else f'schema{args.new_schema} unchanged, no schema migration needed'
+            print(f'PASS: real v{args.legacy_version}→v{args.new_version} update, original data/audit preserved, {detail}')
         finally:
             if active is not None and active.poll() is None:
                 active.terminate()

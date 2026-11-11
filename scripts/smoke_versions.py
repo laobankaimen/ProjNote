@@ -16,7 +16,7 @@ from smoke_v032 import completed_job, digest, export_job, read_docx
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('binary')
-    parser.add_argument('--expected-version', default='0.5.0')
+    parser.add_argument('--expected-version', default='0.5.1')
     parser.add_argument('--expected-schema',type=int,default=9)
     args = parser.parse_args()
     binary = str(Path(args.binary).resolve(strict=True))

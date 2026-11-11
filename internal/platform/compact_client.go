@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -44,11 +45,15 @@ type compactProject struct {
 	Status string `json:"status"`
 }
 type compactTask struct {
-	ID        string `json:"id"`
-	Name      string `json:"name"`
-	ProjectID string `json:"project_id"`
-	PlanEnd   string `json:"plan_end"`
-	Status    string `json:"status"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	ProjectID   string `json:"project_id"`
+	PlanEnd     string `json:"plan_end"`
+	Status      string `json:"status"`
+	Progress    int    `json:"progress"`
+	Version     int    `json:"version"`
+	HasChildren bool   `json:"has_children"`
+	CanComplete bool   `json:"can_complete"`
 }
 type compactHTTPError struct {
 	status  int
@@ -177,8 +182,59 @@ func (c *compactClient) today(ctx context.Context) ([]compactTask, error) {
 	var out struct {
 		Tasks []compactTask `json:"tasks"`
 	}
-	err := c.request(ctx, "GET", "/api/today", nil, &out)
-	return out.Tasks, err
+	if err := c.request(ctx, "GET", "/api/today", nil, &out); err != nil {
+		return nil, err
+	}
+	projects, err := c.projects(ctx)
+	if err != nil {
+		return nil, err
+	}
+	writable := map[string]bool{}
+	for _, p := range projects {
+		writable[p.ID] = true
+	}
+	for i := range out.Tasks {
+		t := &out.Tasks[i]
+		t.CanComplete = writable[t.ProjectID] && !t.HasChildren && t.Version > 0 && (t.Status == "todo" || t.Status == "doing")
+	}
+	return out.Tasks, nil
+}
+
+// Complete one selected leaf task using the exact version shown in the list.
+// Rechecking its project does not advance that version or retry a stale write.
+func (c *compactClient) completeTask(ctx context.Context, id string, version int) (compactTask, error) {
+	var task compactTask
+	if id == "" || len(id) > 128 || strings.TrimSpace(id) != id || strings.ContainsAny(id, "/\\?#") || version < 1 {
+		return task, errors.New("请选择一个有效任务后完成")
+	}
+	path := "/api/tasks/" + url.PathEscape(id)
+	if err := c.request(ctx, "GET", path, nil, &task); err != nil {
+		return task, err
+	}
+	if task.Version != version {
+		return task, &compactHTTPError{409, "任务已被其他入口修改，请查看刷新后的任务再操作"}
+	}
+	if task.HasChildren {
+		return task, errors.New("父任务进度由子任务汇总，请完成具体子任务")
+	}
+	if task.Status != "todo" && task.Status != "doing" {
+		return task, errors.New("任务已结束，请刷新今日任务")
+	}
+	if task.ProjectID == "" || strings.ContainsAny(task.ProjectID, "/\\?#") {
+		return task, errors.New("任务项目无效，请在完整工作台核对")
+	}
+	var project compactProject
+	if err := c.request(ctx, "GET", "/api/projects/"+url.PathEscape(task.ProjectID), nil, &project); err != nil {
+		return task, err
+	}
+	if project.Status == "closed" || project.Status == "archived" || project.ID != task.ProjectID {
+		return task, errors.New("该项目只读，无法完成任务")
+	}
+	err := c.request(ctx, "PATCH", path, map[string]any{"version": version, "status": "done", "progress": 100}, &task)
+	if err == nil && (task.ID != id || task.Version <= version || task.Status != "done" || task.Progress != 100) {
+		err = errors.New("任务完成结果尚未确认，请查看刷新后的列表；请勿重复提交")
+	}
+	return task, err
 }
 func (c *compactClient) saveRecord(ctx context.Context, payload map[string]any) (map[string]any, error) {
 	content, _ := payload["content"].(string)
@@ -265,6 +321,15 @@ func (c *compactClient) dispatch(ctx context.Context, r compactRequest) compactR
 		reply.Data, err = c.projects(ctx)
 	case "today":
 		reply.Data, err = c.today(ctx)
+	case "complete_task":
+		raw, _ := json.Marshal(r.Payload)
+		var input struct {
+			ID      string `json:"id"`
+			Version int    `json:"version"`
+		}
+		if err = json.Unmarshal(raw, &input); err == nil {
+			reply.Data, err = c.completeTask(ctx, input.ID, input.Version)
+		}
 	case "draft":
 		raw, _ := json.Marshal(r.Payload)
 		var d compactDraft

@@ -174,9 +174,11 @@ func TestCompactNativeLifecycle(t *testing.T) {
 	}
 	mock.failClear = false
 	mock.mu.Unlock()
-	command("restore", nil)
+	command("refresh", nil)
 	wait(func(s map[string]any) bool {
-		return s["conflict"] == false && s["content"] == "已保存但清草稿失败"
+		mock.mu.Lock()
+		defer mock.mu.Unlock()
+		return s["conflict"] == false && s["content"] == "" && mock.draft.Content == ""
 	})
 	// An independent writer changes the version; autosave must preserve local text.
 	mock.mu.Lock()
@@ -191,6 +193,46 @@ func TestCompactNativeLifecycle(t *testing.T) {
 	mock.mu.Lock()
 	if mock.draft.Content != "另一个入口的新草稿" {
 		t.Fatal("409 overwrote remote draft")
+	}
+	mock.mu.Unlock()
+	command("refresh", nil)
+	wait(func(s map[string]any) bool {
+		return s["loading"] == false && s["conflict"] == true && s["content"] == "409时本地正文保留"
+	})
+	command("save", nil)
+	wait(func(s map[string]any) bool {
+		return s["saving"] == false && s["content"] == "" && strings.Contains(fmt.Sprint(s["status"]), "服务端其他草稿保留")
+	})
+	mock.mu.Lock()
+	if len(mock.records) != 3 || mock.records[2]["content"] != "409时本地正文保留" || mock.draft.Content != "另一个入口的新草稿" {
+		t.Fatalf("conflicting local draft cannot be saved independently: %#v %#v", mock.records, mock.draft)
+	}
+	mock.todayTask.Version++
+	mock.mu.Unlock()
+	command("fill", map[string]any{"content": "完成任务时保留正文"})
+	command("select_task", map[string]any{"index": 0})
+	command("complete_task", nil)
+	state = wait(func(s map[string]any) bool {
+		return s["completing"] == false && strings.Contains(fmt.Sprint(s["status"]), "任务已变化")
+	})
+	if state["content"] != "完成任务时保留正文" {
+		t.Fatal("task conflict cleared note", state)
+	}
+	command("select_task", map[string]any{"index": 0})
+	wait(func(s map[string]any) bool { return s["complete_enabled"] == true })
+	command("complete_task", nil)
+	state = wait(func(s map[string]any) bool { return s["completing"] == false && len(s["task_items"].([]any)) == 0 })
+	if state["content"] != "完成任务时保留正文" || state["complete_enabled"] != false {
+		t.Fatal("completion changed note or kept action enabled", state)
+	}
+	for _, label := range state["action_labels"].([]any) {
+		if label == "恢复草稿" {
+			t.Fatal("restore action remains visible")
+		}
+	}
+	mock.mu.Lock()
+	if len(mock.taskUpdates) != 1 || mock.taskUpdates[0]["status"] != "done" || mock.taskUpdates[0]["progress"] != float64(100) || mock.todayTask.Status != "done" {
+		t.Fatalf("single completion not persisted: %#v %#v", mock.taskUpdates, mock.todayTask)
 	}
 	mock.mu.Unlock()
 	cancel()
@@ -217,6 +259,76 @@ func TestCompactWithoutDisplayDoesNotFallback(t *testing.T) {
 	t.Setenv("DISPLAY", "")
 	if _, err := StartCompact(context.Background(), "http://127.0.0.1:18600/#/compact", "http://127.0.0.1:18600/"); err == nil || !strings.Contains(err.Error(), "DISPLAY") {
 		t.Fatalf("missing native display must be explicit: %v", err)
+	}
+}
+
+func TestCompactNativeRefreshReconnectRetainsOfflineInput(t *testing.T) {
+	if os.Getenv("PROJNOTE_TEST_COMPACT_NATIVE") != "1" {
+		t.Skip("native desktop check requires explicit opt-in")
+	}
+	mock, server := newCompactMockService(t)
+	mock.mu.Lock()
+	mock.failDraftLoad = true
+	mock.mu.Unlock()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	entry, err := startCompact(ctx, server.URL+"/#/compact", server.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer entry.Close()
+	native := entry.(*compactEntry).Closer.(*compactLinuxCloser)
+	command := func(action string, values map[string]any) {
+		t.Helper()
+		payload := map[string]any{"test_action": action}
+		for k, v := range values {
+			payload[k] = v
+		}
+		if err := native.send(payload); err != nil {
+			t.Fatal(err)
+		}
+	}
+	wait := func(check func(map[string]any) bool) map[string]any {
+		t.Helper()
+		var state map[string]any
+		deadline := time.Now().Add(5 * time.Second)
+		for time.Now().Before(deadline) {
+			command("inspect", nil)
+			select {
+			case state = <-native.states:
+				if check(state) {
+					return state
+				}
+			case <-time.After(2 * time.Second):
+				t.Fatal("inspect timed out")
+			}
+			time.Sleep(25 * time.Millisecond)
+		}
+		t.Fatalf("condition not reached: %#v", state)
+		return nil
+	}
+	wait(func(s map[string]any) bool {
+		return s["loading"] == false && strings.Contains(fmt.Sprint(s["status"]), "无法读取草稿")
+	})
+	command("open", nil)
+	wait(func(s map[string]any) bool { return s["visible"] == true && s["loading"] == false })
+	command("mode", map[string]any{"mode": "record"})
+	command("fill", map[string]any{"content": "断开连接时的本地正文\n第二行"})
+	mock.mu.Lock()
+	mock.failDraftLoad = false
+	mock.mu.Unlock()
+	command("refresh", nil)
+	wait(func(s map[string]any) bool {
+		return s["loading"] == false && s["conflict"] == true && s["content"] == "断开连接时的本地正文\n第二行"
+	})
+	command("save", nil)
+	wait(func(s map[string]any) bool {
+		return s["saving"] == false && s["content"] == "" && strings.Contains(fmt.Sprint(s["status"]), "服务端其他草稿保留")
+	})
+	mock.mu.Lock()
+	defer mock.mu.Unlock()
+	if len(mock.records) != 1 || mock.records[0]["content"] != "断开连接时的本地正文\n第二行" || mock.draft.Content != "服务端已有正文草稿" || mock.draftWrites != 0 {
+		t.Fatalf("reconnect lost input or overwrote remote: %#v %#v", mock.records, mock.draft)
 	}
 }
 
@@ -406,11 +518,20 @@ func TestCompactNativeTaskAndRecordModes(t *testing.T) {
 	if state["mode"] != "task" || state["content"] != "冲突时任务正文保留" {
 		t.Fatal("409 lost local mode/content", state)
 	}
-	command("restore", nil)
+	command("refresh", nil)
 	wait(func(s map[string]any) bool {
-		return s["conflict"] == false && s["mode"] == "record" && s["content"] == "其他入口的速记" && s["save_label"] == "保存速记"
+		return s["loading"] == false && s["conflict"] == true && s["mode"] == "task" && s["content"] == "冲突时任务正文保留"
 	})
-	t.Log("PASS native GTK mode controls: first blank task/sole project, mode switch retention, missing-project guard, task failure retention, real task POST and refreshed Today, record POST, mode draft restore, collapse/Show and 409 retention")
+	command("save", nil)
+	wait(func(s map[string]any) bool {
+		return s["saving"] == false && s["content"] == "" && strings.Contains(fmt.Sprint(s["status"]), "已添加到今日任务")
+	})
+	mock.mu.Lock()
+	if len(mock.taskInputs) != 2 || mock.draft.Content != "其他入口的速记" || mock.draft.Mode != "record" {
+		t.Fatalf("conflict resolution overwrote remote draft: %#v", mock.draft)
+	}
+	mock.mu.Unlock()
+	t.Log("PASS native GTK mode controls: first blank task/sole project, mode switch retention, missing-project guard, task failure retention, real task POST and refreshed Today, record POST, safe refresh/reconnect, collapse/Show and independent save after 409")
 }
 
 func TestCompactNativeSingleArrowCloseReopenNoDrag(t *testing.T) {

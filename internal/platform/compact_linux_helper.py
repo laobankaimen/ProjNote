@@ -16,6 +16,7 @@ state = {"seq": 0, "pending": {}, "loading": True, "version": 0,
          "dirty": False, "draft_busy": False, "saving": False,
          "conflict": False, "debounce": 0, "suppress": False,
          "first_load": True, "auto_project": False, "project_items": None, "task_items": [],
+         "draft_loading": False, "draft_snapshot": None, "completing": False,
          "dock_area": None, "settle_dock": 0, "entry_ready": False}
 
 
@@ -155,9 +156,7 @@ actions = Gtk.Box(spacing=6)
 save_button = Gtk.Button(label="添加任务")
 save_button.get_style_context().add_class("primary")
 refresh_button = Gtk.Button(label="刷新任务")
-restore_button = Gtk.Button(label="恢复草稿")
 actions.pack_start(save_button, True, True, 0)
-actions.pack_start(restore_button, False, False, 0)
 actions.pack_start(refresh_button, False, False, 0)
 outer.pack_start(actions, False, False, 0)
 status = Gtk.Label(label="正在读取本机草稿…", xalign=0)
@@ -166,9 +165,15 @@ status.set_max_width_chars(38)
 status.get_style_context().add_class("hint")
 outer.pack_start(status, False, False, 0)
 outer.pack_start(Gtk.Separator(), False, False, 0)
-outer.pack_start(Gtk.Label(label="今日任务（只读）", xalign=0), False, False, 0)
+task_heading = Gtk.Box(spacing=6)
+task_heading.pack_start(Gtk.Label(label="今日任务", xalign=0), True, True, 0)
+complete_button = Gtk.Button(label="完成选中")
+complete_button.set_tooltip_text("仅将选中的一项任务标记为完成；父任务和只读项目不可操作")
+complete_button.set_sensitive(False)
+task_heading.pack_end(complete_button, False, False, 0)
+outer.pack_start(task_heading, False, False, 0)
 tasks = Gtk.ListBox()
-tasks.set_selection_mode(Gtk.SelectionMode.NONE)
+tasks.set_selection_mode(Gtk.SelectionMode.SINGLE)
 tasks_scroll = Gtk.ScrolledWindow()
 tasks_scroll.set_min_content_height(132)
 tasks_scroll.add(tasks)
@@ -193,7 +198,6 @@ def set_editable(enabled):
     mode.set_sensitive(enabled)
     text.set_sensitive(enabled)
     save_button.set_sensitive(enabled and not state["loading"])
-    restore_button.set_sensitive(enabled)
 
 
 def update_mode(*_args):
@@ -224,7 +228,7 @@ def schedule_draft(*_args):
 
 def persist_draft():
     state["debounce"] = 0
-    if state["loading"] or state["draft_busy"] or state["saving"] or state["conflict"] or not state["dirty"]:
+    if state["loading"] or not state["version"] or state["draft_busy"] or state["saving"] or state["conflict"] or not state["dirty"]:
         return False
     snapshot = current()
     state["draft_busy"] = True
@@ -234,9 +238,10 @@ def persist_draft():
         state["draft_busy"] = False
         if message.get("error"):
             state["conflict"] = message.get("status") == 409
-            status.set_text("草稿冲突，正文仍在本窗口；可保存为记录或明确恢复服务端草稿。" if state["conflict"] else "草稿未写入，输入保留：" + message["error"])
+            status.set_text("草稿冲突，正文仍在本窗口；可继续保存当前内容，其他入口草稿会保留。" if state["conflict"] else "草稿未写入，输入保留；可点击刷新任务重连：" + message["error"])
             return
         state["version"] = message["data"]["version"]
+        state["draft_snapshot"] = {key: message["data"].get(key, "") for key in ("content", "project_id", "mode")}
         state["dirty"] = current() != snapshot
         status.set_text("正文草稿已保存" if not state["dirty"] else "还有新输入待保存")
         if state["dirty"]:
@@ -246,33 +251,49 @@ def persist_draft():
     return False
 
 
-def load_draft(explicit=False):
+def load_draft():
+    if state["draft_loading"] or state["draft_busy"] or state["saving"]:
+        return
+    state["draft_loading"] = True
+    state["loading"] = True
     snapshot_before = current()
+    known = state["draft_snapshot"]
+    previous_version = state["version"]
     status.set_text("正在读取本机草稿…")
 
     def replied(message):
         state["loading"] = False
+        state["draft_loading"] = False
         save_button.set_sensitive(not state["saving"])
         if message.get("error"):
             status.set_text("无法读取草稿，输入保留：" + message["error"])
             return
         draft = message["data"]
+        remote = {"content": draft.get("content", ""), "project_id": draft.get("project_id", ""), "mode": draft.get("mode") or "record"}
         state["version"] = draft["version"]
-        if explicit or (not state["dirty"] and current() == snapshot_before):
+        if not state["dirty"] and not state["conflict"] and current() == snapshot_before:
             state["suppress"] = True
             buffer.set_text(draft.get("content", ""))
             ensure_project(draft.get("project_id", ""))
             mode.set_active_id(draft.get("mode") or "record")
             update_mode()
-            state["auto_project"] = state["first_load"] and not explicit and not draft.get("updated_at") and draft.get("mode") == "task" and not draft.get("content", "").strip() and not draft.get("project_id")
+            state["auto_project"] = state["first_load"] and not draft.get("updated_at") and draft.get("mode") == "task" and not draft.get("content", "").strip() and not draft.get("project_id")
             state["suppress"] = False
             state["dirty"] = False
             state["conflict"] = False
-            status.set_text("已恢复服务端草稿与模式" if explicit else "草稿就绪；收起窗口仍会保留")
+            state["draft_snapshot"] = remote
+            status.set_text("草稿就绪；收起窗口仍会保留")
             maybe_auto_project()
+        elif remote == current() or (known is not None and remote == known) or (not previous_version and not remote["content"].strip()):
+            state["draft_snapshot"] = remote
+            state["conflict"] = False
+            state["dirty"] = current() != remote
+            status.set_text("已重新连接，保留本地正文")
+            if state["dirty"]:
+                schedule_draft()
         else:
             state["conflict"] = True
-            status.set_text("读取期间已有输入，已保留本地内容；可明确恢复服务端草稿。")
+            status.set_text("其他入口草稿已变化，本地正文保留；保存当前内容时不会覆盖其他草稿。")
         state["first_load"] = False
 
     request("load_draft", callback=replied)
@@ -284,7 +305,9 @@ def ensure_project(project_id):
         projects.set_active_id(project_id)
 
 
-def refresh():
+def refresh(reload_draft=False):
+    if reload_draft:
+        load_draft()
     def got_projects(message):
         if message.get("error"):
             status.set_text("项目读取失败，输入仍保留：" + message["error"])
@@ -317,9 +340,42 @@ def refresh():
         if not items:
             tasks.add(Gtk.Label(label="今日暂无任务", xalign=0))
         tasks.show_all()
+        selected_task_changed()
 
     request("projects", callback=got_projects)
     request("today", callback=got_today)
+
+
+def selected_task_changed(*_args):
+    row = tasks.get_selected_row()
+    index = row.get_index() if row else -1
+    eligible = 0 <= index < len(state["task_items"]) and state["task_items"][index].get("can_complete", False)
+    complete_button.set_sensitive(eligible and not state["completing"])
+
+
+def complete_selected(*_args):
+    row = tasks.get_selected_row()
+    index = row.get_index() if row else -1
+    if state["completing"] or not 0 <= index < len(state["task_items"]):
+        return
+    item = state["task_items"][index]
+    if not item.get("can_complete"):
+        status.set_text("请选择具体子任务；父任务和只读项目无法直接完成")
+        return
+    state["completing"] = True
+    selected_task_changed()
+    status.set_text("正在完成选中任务…")
+
+    def completed(message):
+        state["completing"] = False
+        selected_task_changed()
+        if message.get("error"):
+            status.set_text(("任务已变化，列表已刷新，请核对后重试；正文保留：" if message.get("status") == 409 else "任务未完成，正文保留：") + message["error"])
+        else:
+            status.set_text("已完成：" + item.get("name", ""))
+        refresh()
+
+    request("complete_task", {"id": item["id"], "version": item["version"]}, completed)
 
 
 def save(*_args):
@@ -359,9 +415,10 @@ def save(*_args):
                 set_editable(True)
                 if reply.get("error"):
                     state["conflict"] = True
-                    status.set_text(confirmed + "，请勿重复提交；服务端草稿未清除，可明确恢复核对。")
+                    status.set_text(confirmed + "，请勿重复提交；服务端草稿未清除，可刷新任务重新连接。")
                 else:
                     state["version"] = reply["data"]["version"]
+                    state["draft_snapshot"] = {"content": "", "project_id": submitted["project_id"], "mode": submitted["mode"]}
                     status.set_text(confirmed)
                 refresh()
             request("draft", {"version": state["version"], "content": "", "project_id": submitted["project_id"], "mode": submitted["mode"]}, cleared)
@@ -379,13 +436,14 @@ def save(*_args):
             status.set_text("正文仍保留，草稿写入未确认：" + message["error"])
             return
         state["version"] = message["data"]["version"]
+        state["draft_snapshot"] = submitted.copy()
         state["conflict"] = False
         request("save", submitted, saved)
 
     if not state["version"]:
         state["saving"] = False
         set_editable(True)
-        status.set_text("请先恢复本机草稿连接，再保存；正文仍保留。")
+        status.set_text("请点击刷新任务重新连接，再保存；正文仍保留。")
         return
     if state["conflict"]:
         # A conflicting remote draft must never be overwritten. Save this local
@@ -393,19 +451,6 @@ def save(*_args):
         request("save", submitted, saved)
     else:
         request("draft", {**submitted, "version": state["version"]}, flushed)
-
-
-def restore(*_args):
-    if state["saving"] or state["draft_busy"]:
-        return
-    if current()["content"].strip():
-        dialog = Gtk.MessageDialog(transient_for=panel, modal=True, message_type=Gtk.MessageType.QUESTION,
-                                   buttons=Gtk.ButtonsType.OK_CANCEL, text="用服务端草稿替换当前正文？")
-        result = dialog.run()
-        dialog.destroy()
-        if result != Gtk.ResponseType.OK:
-            return
-    load_draft(True)
 
 
 def settle_dock():
@@ -589,8 +634,12 @@ def test_action(command):
         area = usable_area(geometry, work)
         x, y = dock_position(area, int(command["width"]), int(command["height"]))
         print(json.dumps({"action": "test_state", "payload": {"x": x, "y": y, "area": {name: getattr(area, name) for name in ("x", "y", "width", "height")}}}), flush=True)
-    elif action == "restore":
-        load_draft(True)
+    elif action == "refresh":
+        refresh_button.clicked()
+    elif action == "select_task":
+        tasks.select_row(tasks.get_row_at_index(int(command.get("index", -1))))
+    elif action == "complete_task":
+        complete_button.clicked()
     elif action == "inspect":
         ex, ey = entry.get_position()
         ew, eh = entry.get_size()
@@ -603,6 +652,7 @@ def test_action(command):
                     "entry_visible": entry.get_visible(), "loading": state["loading"],
                     "saving": state["saving"], "draft_busy": state["draft_busy"],
                     "conflict": state["conflict"], "task_count": len(tasks.get_children()), "task_items": state["task_items"], "save_label": save_button.get_label(),
+                    "complete_enabled": complete_button.get_sensitive(), "completing": state["completing"], "action_labels": [child.get_label() for child in actions.get_children()],
                     "entry_text": entry_open.get_label(), "panel_decorated": panel.get_decorated(), "panel_resizable": panel.get_resizable(),
                     "full_text": full_button.get_label(), "close_text": close_button.get_label(), "menu_items": list(menu_actions), "version_text": version_label.get_text(),
                     "task_view_height": tasks_scroll.get_allocated_height(), "task_row_heights": [child.get_allocated_height() for child in tasks.get_children()],
@@ -654,8 +704,9 @@ mode.connect("changed", update_mode)
 buffer.connect("changed", schedule_draft)
 projects.connect("changed", schedule_draft)
 save_button.connect("clicked", save)
-refresh_button.connect("clicked", lambda *_: refresh())
-restore_button.connect("clicked", restore)
+refresh_button.connect("clicked", lambda *_: refresh(True))
+complete_button.connect("clicked", complete_selected)
+tasks.connect("row-selected", selected_task_changed)
 full_button.connect("clicked", lambda *_: request("open_full"))
 close_button.connect("clicked", hide_panel)
 panel.connect("realize", lambda *_: panel.get_window().set_functions(Gdk.WMFunction.CLOSE))

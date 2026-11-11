@@ -89,6 +89,8 @@ type windowsCompact struct {
 	panel                                                     uintptr
 	controls                                                  map[int]uintptr
 	projects                                                  []compactProject
+	tasks                                                     []compactTask
+	completing                                                bool
 	draft                                                     compactDraft
 	initialized, draftBusy, saving, dirty, conflict, suppress bool
 	view                                                      compactViewState

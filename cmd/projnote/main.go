@@ -29,7 +29,7 @@ import (
 	"projnote/internal/store"
 )
 
-var version = "0.5.0-dev"
+var version = "0.5.1-dev"
 
 type runtimeInfo struct {
 	URL      string `json:"url"`
@@ -238,6 +238,7 @@ func run() (runErr error) {
 	srv := &http.Server{ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 60 * time.Second, WriteTimeout: 5 * time.Minute, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 32 << 10}
 	manager := newBackupManager(dataDir, st)
 	app := &server.Server{Backup: manager, Store: st, DataDir: dataDir, Host: host, Version: version, RuntimeToken: info.Instance, Shutdown: cancel}
+	configureAutoStart(app, dataDir)
 	lanRuntime := server.NewLANRuntime(dataDir, info.URL, app.LANHandler(), st.RevokeAllLANSessions)
 	app.StartLAN, app.StopLAN, app.LANInfo = lanRuntime.Start, lanRuntime.Stop, lanRuntime.Info
 	app.RenewLANCertificate = lanRuntime.RenewCertificate

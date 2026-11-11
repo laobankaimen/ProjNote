@@ -40,6 +40,8 @@ type Server struct {
 	StopLAN             func() error
 	LANInfo             func() map[string]any
 	RenewLANCertificate func() (map[string]any, error)
+	AutoStartStatus     func() (map[string]any, error)
+	SetAutoStart        func(bool) (map[string]any, error)
 	exports             exportRuntime
 	exportWorker        sync.Mutex
 }
@@ -132,6 +134,10 @@ func bodyLimit(w http.ResponseWriter, r *http.Request, max int64) (map[string]an
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	p := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/"), "/"), "/")
 	kind := p[0]
+	if kind == "system" && len(p) == 2 && p[1] == "autostart" {
+		s.autoStartAPI(w, r)
+		return
+	}
 	if kind == "meeting-minutes" {
 		kind = "meeting_minutes"
 	}
