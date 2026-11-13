@@ -29,7 +29,7 @@ import (
 	"projnote/internal/store"
 )
 
-var version = "0.6.0-dev"
+var version = "0.6.1-dev"
 
 type runtimeInfo struct {
 	URL      string `json:"url"`

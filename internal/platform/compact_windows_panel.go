@@ -129,14 +129,14 @@ func (e *windowsCompact) showPanel() {
 		e.suppress = true
 		e.createControl("STATIC", "今日工作", compactHeading, 0)
 		e.createControl("COMBOBOX", "", compactMode, 0x0003|0x00010000)
-		compactSend(e.controls[compactMode], 0x0143, 0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("添加任务"))))
-		compactSend(e.controls[compactMode], 0x0143, 0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("现场速记"))))
+		compactSend(e.controls[compactMode], 0x0143, 0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("添加备忘"))))
+		compactSend(e.controls[compactMode], 0x0143, 0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("工作记录"))))
 		compactSend(e.controls[compactMode], 0x014E, 0, 0)
 		e.createControl("COMBOBOX", "", compactProjectID, 0x0003|0x00200000|0x00010000)
 		compactSend(e.controls[compactProjectID], 0x0143, 0, uintptr(unsafe.Pointer(windows.StringToUTF16Ptr("未归类"))))
 		compactSend(e.controls[compactProjectID], 0x014E, 0, 0)
 		e.createControl("EDIT", "", compactBody, 0x00800000|0x00200000|0x0004|0x0040|0x1000|0x00010000)
-		e.createControl("BUTTON", "添加任务", compactSave, 0x00010000|0x000B)
+		e.createControl("BUTTON", "添加备忘", compactSave, 0x00010000|0x000B)
 		e.createControl("BUTTON", "刷新任务", compactRefresh, 0x00010000)
 		e.createControl("STATIC", "正在读取正文草稿…", compactStatus, 0)
 		e.createControl("STATIC", "今日任务", compactTodayHeading, 0)
@@ -209,9 +209,9 @@ func (e *windowsCompact) currentDraft() compactDraft {
 	return compactDraft{Content: compactText(e.controls[compactBody]), ProjectID: e.selectedProject(), Mode: mode, Version: e.draft.Version}
 }
 func (e *windowsCompact) selectMode(mode string) {
-	index, label := uintptr(0), "添加任务"
+	index, label := uintptr(0), "添加备忘"
 	if mode == "record" {
-		index, label = 1, "保存速记"
+		index, label = 1, "保存记录"
 	}
 	compactSend(e.controls[compactMode], 0x014E, index, 0)
 	compactSetText(e.controls[compactSave], label)
@@ -350,17 +350,17 @@ func (e *windowsCompact) saveNote() {
 	snapshot := e.currentDraft()
 	if strings.TrimSpace(snapshot.Content) == "" {
 		if snapshot.Mode == "task" {
-			e.statusText("请填写任务标题")
+			e.statusText("请填写备忘标题")
 		} else {
-			e.statusText("请填写速记正文")
+			e.statusText("请填写工作记录正文")
 		}
 		return
 	}
 	if snapshot.Mode == "task" && snapshot.ProjectID == "" {
-		e.statusText("请选择项目后添加任务")
+		e.statusText("请选择项目后添加备忘")
 		return
 	}
-	confirmed := "速记已保存"
+	confirmed := "工作记录已保存"
 	if snapshot.Mode == "task" {
 		confirmed = "已添加到今日任务"
 	}
@@ -597,9 +597,9 @@ func (e *windowsCompact) panelProc(message uint32, wparam, lparam uintptr) uintp
 			e.selectMode(e.currentDraft().Mode)
 			e.scheduleDraft()
 			if e.currentDraft().Mode == "task" {
-				e.statusText("任务模式：选择项目，第一行作标题")
+				e.statusText("添加备忘：选择项目，第一行作标题")
 			} else {
-				e.statusText("速记模式：保存为现场记录")
+				e.statusText("工作记录模式：保存为工作记录")
 			}
 			return 0
 		}

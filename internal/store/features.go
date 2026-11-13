@@ -425,7 +425,7 @@ func (s *Store) GenerateLog(input map[string]any) (map[string]any, error) {
 	if assignee != "" {
 		fmt.Fprintf(&b, "人员：%s（个人日志）\n\n", assignee)
 	}
-	for _, section := range []struct{ kind, title, col string }{{"tasks", "任务进展", "updated_at"}, {"records", "现场记录", "occurred_at"}, {"issues", "问题跟踪", "updated_at"}} {
+	for _, section := range []struct{ kind, title, col string }{{"tasks", "任务进展", "updated_at"}, {"records", "工作记录", "occurred_at"}, {"issues", "问题跟踪", "updated_at"}} {
 		fmt.Fprintf(&b, "## %s\n\n", section.title)
 		where := " WHERE deleted_at='' AND julianday(" + section.col + ")>=julianday(?) AND julianday(" + section.col + ")<julianday(?)"
 		args := []any{start.UTC().Format(time.RFC3339Nano), end.UTC().Format(time.RFC3339Nano)}

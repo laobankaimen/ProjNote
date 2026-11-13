@@ -19,3 +19,15 @@
 .worklog-mode{display:flex;gap:5px;border-bottom:1px solid #dae5f3;margin:-5px 0 23px}.worklog-mode>a{font-size:12px;color:#8ba1be;padding:10px 17px;border-bottom:2px solid transparent}.worklog-mode>a.selected{color:#427bc4;border-bottom-color:#729dd9;background:#edf3fc}.import-row-number{font-size:9px;color:#a2b3ca}.time-summary-panel details>summary{line-height:1.8}
 
 .today-task-main{flex:1;min-width:0;border:0;padding:0;background:none;color:inherit;text-align:left}.today-task-main h3{overflow-wrap:anywhere}.task-summary-symbol{width:18px;color:#9baec7;text-align:center;margin-top:3px;flex-shrink:0}.compact-finish{margin-top:1px}.compact-tasks li strong{overflow-wrap:anywhere}
+
+/* Stable WBS geometry: optional actions never change a row's leading columns. */
+.task-title-cell .wbs-title{display:flex;align-items:flex-start;gap:8px;position:relative}
+.task-drag-slot{display:inline-flex;flex:0 0 20px;width:20px;min-height:24px;align-items:center;justify-content:center}
+.task-title-cell .tree-toggle,.task-title-cell .tree-toggle-spacer{display:inline-flex;flex:0 0 20px;width:20px;height:24px;align-items:center;justify-content:center}
+.task-title-cell .wbs-code{flex:0 0 54px;min-width:54px;line-height:24px;margin:0;text-align:left;overflow-wrap:anywhere}
+.task-title-cell .wbs-title>div{flex:1;min-width:0}
+.task-title-cell .inline-value{align-items:flex-start}
+.task-title-cell .table-title{line-height:24px;text-align:left;overflow-wrap:anywhere}
+.task-table .task-title-cell{min-width:300px}
+.task-selection{min-height:56px;margin:0 0 14px}.task-selection strong{min-width:76px}
+.breadcrumb{flex-wrap:wrap;row-gap:4px}.breadcrumb a{color:var(--muted);text-decoration:none}.breadcrumb a:hover{color:var(--blue);text-decoration:underline}

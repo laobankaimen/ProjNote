@@ -127,17 +127,17 @@ heading.pack_end(close_button, False, False, 0)
 outer.pack_start(heading, False, False, 0)
 mode_row = Gtk.Box(spacing=7)
 mode = Gtk.ComboBoxText()
-mode.append("task", "添加任务")
-mode.append("record", "现场速记")
+mode.append("task", "添加备忘")
+mode.append("record", "工作记录")
 mode.set_active_id("task")
-mode.set_tooltip_text("任务会加入今日任务；速记保存为现场记录")
+mode.set_tooltip_text("备忘会加入所选项目的今日任务；工作记录可稍后整理为日志")
 mode_row.pack_start(mode, False, False, 0)
 projects = Gtk.ComboBoxText()
 projects.append("", "未归类")
 projects.set_active_id("")
 mode_row.pack_start(projects, True, True, 0)
 outer.pack_start(mode_row, False, False, 0)
-mode_hint = Gtk.Label(label="第一行作任务标题，其余内容保留为详情", xalign=0)
+mode_hint = Gtk.Label(label="第一行作备忘标题，其余内容保留为详情", xalign=0)
 mode_hint.get_style_context().add_class("hint")
 outer.pack_start(mode_hint, False, False, 0)
 text = Gtk.TextView()
@@ -153,7 +153,7 @@ scroll.set_min_content_height(95)
 scroll.add(text)
 outer.pack_start(scroll, True, True, 0)
 actions = Gtk.Box(spacing=6)
-save_button = Gtk.Button(label="添加任务")
+save_button = Gtk.Button(label="添加备忘")
 save_button.get_style_context().add_class("primary")
 refresh_button = Gtk.Button(label="刷新任务")
 actions.pack_start(save_button, True, True, 0)
@@ -202,9 +202,9 @@ def set_editable(enabled):
 
 def update_mode(*_args):
     is_task = current()["mode"] == "task"
-    save_button.set_label("添加任务" if is_task else "保存速记")
-    mode_hint.set_text("第一行作任务标题，其余内容保留为详情" if is_task else "保存到现场记录，可稍后整理为日志")
-    projects.set_tooltip_text("任务必须选择一个项目" if is_task else "速记可保存为未归类")
+    save_button.set_label("添加备忘" if is_task else "保存记录")
+    mode_hint.set_text("第一行作备忘标题，其余内容保留为详情" if is_task else "保存到工作记录，可稍后整理为日志")
+    projects.set_tooltip_text("备忘必须选择一个项目" if is_task else "工作记录可保存为未归类")
     schedule_draft()
 
 
@@ -387,15 +387,15 @@ def save(*_args):
     submitted = current()
     is_task = submitted["mode"] == "task"
     if not submitted["content"].strip():
-        status.set_text("请填写任务标题" if is_task else "请填写速记正文")
+        status.set_text("请填写备忘标题" if is_task else "请填写工作记录正文")
         return
     if is_task and not submitted["project_id"]:
-        status.set_text("请选择项目后添加任务")
+        status.set_text("请选择项目后添加备忘")
         return
-    confirmed = "已添加到今日任务" if is_task else "速记已保存"
+    confirmed = "已添加到今日任务" if is_task else "工作记录已保存"
     state["saving"] = True
     set_editable(False)
-    status.set_text("正在添加任务…" if is_task else "正在保存速记…")
+    status.set_text("正在添加备忘…" if is_task else "正在保存记录…")
 
     def saved(message):
         if message.get("error"):

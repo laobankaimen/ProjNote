@@ -145,7 +145,7 @@ func TestCompactNativeLifecycle(t *testing.T) {
 	mock.mu.Unlock()
 	command("save", nil)
 	wait(func(s map[string]any) bool {
-		return s["saving"] == false && s["content"] == "" && strings.Contains(fmt.Sprint(s["status"]), "速记已保存")
+		return s["saving"] == false && s["content"] == "" && strings.Contains(fmt.Sprint(s["status"]), "工作记录已保存")
 	})
 	mock.mu.Lock()
 	if len(mock.records) != 1 || mock.records[0]["content"] != "原生控件输入，收起仍保留" || mock.draft.Content != "" || mock.badHeader {
@@ -167,7 +167,9 @@ func TestCompactNativeLifecycle(t *testing.T) {
 		return s["saving"] == false && s["content"] == "" && strings.Contains(fmt.Sprint(s["status"]), "请勿重复提交")
 	})
 	command("save", nil)
-	wait(func(s map[string]any) bool { return strings.Contains(fmt.Sprint(s["status"]), "请填写速记正文") })
+	wait(func(s map[string]any) bool {
+		return strings.Contains(fmt.Sprint(s["status"]), "请填写工作记录正文")
+	})
 	mock.mu.Lock()
 	if len(mock.records) != 2 || mock.draft.Content != "已保存但清草稿失败" {
 		t.Fatalf("clear failure repeated or lost note: %#v %#v", mock.records, mock.draft)
@@ -440,7 +442,7 @@ func TestCompactNativeTaskAndRecordModes(t *testing.T) {
 		t.Fatal(err)
 	}
 	wait(func(s map[string]any) bool {
-		return s["loading"] == false && s["mode"] == "task" && s["project_id"] == "only" && s["save_label"] == "添加任务"
+		return s["loading"] == false && s["mode"] == "task" && s["project_id"] == "only" && s["save_label"] == "添加备忘"
 	})
 	command("fill", map[string]any{"content": "  原生新增任务  \n保留全部说明"})
 	command("mode", map[string]any{"mode": "record"})
@@ -502,7 +504,7 @@ func TestCompactNativeTaskAndRecordModes(t *testing.T) {
 	})
 	command("save", nil)
 	wait(func(s map[string]any) bool {
-		return s["saving"] == false && s["content"] == "" && strings.Contains(fmt.Sprint(s["status"]), "速记已保存")
+		return s["saving"] == false && s["content"] == "" && strings.Contains(fmt.Sprint(s["status"]), "工作记录已保存")
 	})
 	mock.mu.Lock()
 	if len(mock.records) != 1 || len(mock.taskInputs) != 1 {

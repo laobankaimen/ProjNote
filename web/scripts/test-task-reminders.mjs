@@ -37,6 +37,13 @@ const renderer=createRenderer({createElement:node,createText:text=>({...node('te
 function walk(n,predicate){if(predicate(n))return n;for(const child of n.children){const found=walk(child,predicate);if(found)return found}}
 function text(n){return [n.text||'',...n.children.map(text)].join('')}
 function key(properties={}){return {key:'Enter',isComposing:false,keyCode:13,ctrlKey:false,metaKey:false,altKey:false,shiftKey:false,defaultPrevented:false,preventDefault(){this.defaultPrevented=true},stopPropagation(){},...properties}}
+async function setDateTime(dialog,date,hour,minute){
+ const picker=walk(dialog,n=>n.class==='local-datetime');assert.ok(picker,'separate date and time picker exists')
+ walk(picker,n=>n.type==='date').onInput({target:{value:date}});await settle()
+ const selects=picker.children.filter(n=>n.type==='label').map(n=>walk(n,c=>c.type==='select')).filter(Boolean)
+ selects[0].onChange({target:{value:hour}});await settle();selects[1].onChange({target:{value:minute}});await settle()
+ assert.equal(selects[0].children.filter(n=>n.type==='option').length,25);assert.equal(selects[1].children.filter(n=>n.type==='option').length,61)
+}
 async function settle(){for(let i=0;i<5;i++){await nextTick();await new Promise(resolve=>setImmediate(resolve))}}
 
 const requests=[]
@@ -75,14 +82,14 @@ try{
  const selects=[];function collect(n){if(n.type==='select')selects.push(n);n.children.forEach(collect)}collect(dialog)
  const projectOptions=text(selects[0]);assert.ok(!projectOptions.includes('结项项目'),'read-only projects cannot create reminders')
  const taskOptions=text(selects[1]);assert.ok(taskOptions.includes(leaf.name));for(const excluded of ['汇总任务','已完成任务','已取消任务','结项项目任务'])assert.ok(!taskOptions.includes(excluded),excluded+' cannot receive a new reminder')
- assert.equal(walk(dialog,n=>n.type==='input'&&n.type!=='datetime-local'),undefined,'no standalone free-text reminder title')
- selects[1]['onUpdate:modelValue']('leaf');walk(dialog,n=>n.type==='datetime-local')['onUpdate:modelValue']('2026-11-13T16:00');await settle()
+ assert.equal(walk(dialog,n=>n.type==='text'&&n.tagName==='INPUT'),undefined,'no standalone free-text reminder title');assert.ok(!taskOptions.includes('1 '+leaf.name),'reminder task has no WBS prefix')
+ selects[1]['onUpdate:modelValue']('leaf');await setDateTime(dialog,'2026-11-13','16','00');await settle()
  await walk(dialog,n=>n.type==='form').onSubmit(key());await settle()
  const created=requests.findLast(r=>r.url==='/api/task-reminders'&&r.method==='POST');assert.deepEqual(Object.keys(created.body).sort(),['due_at','task_id']);assert.equal(created.body.task_id,'leaf')
  await button(leaf.name).onClick();await settle();dialog=walk(root,n=>n.type==='dialog'&&n.open)
- const dateInput=walk(dialog,n=>n.type==='datetime-local');dateInput['onUpdate:modelValue']('2026-11-13T17:30');await settle();stale=true
+ const dateInput=walk(dialog,n=>n.type==='date');await setDateTime(dialog,'2026-11-13','17','30');await settle();stale=true
  await walk(dialog,n=>n.type==='form').onSubmit(key());await settle()
- assert.equal(dateInput.value,'2026-11-13T17:30','409 retains edited reminder time');assert.ok(text(dialog).includes('数据库内容已更新'))
+ assert.equal(dateInput.value,'2026-11-13','409 retains edited reminder time');assert.ok(text(dialog).includes('数据库内容已更新'))
  assert.equal(requests.findLast(r=>r.method==='PATCH').body.version,3)
  await walk(dialog,n=>n['aria-label']==='关闭对话框').onClick();await settle();await button('结束提醒').onClick();await settle()
  assert.ok(reminders[0].done_at);assert.equal(leaf.status,'doing','ending reminder leaves task status unchanged');assert.equal(requests.filter(r=>r.url.startsWith('/api/tasks/')&&r.method==='PATCH').length,0)

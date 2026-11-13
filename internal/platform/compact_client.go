@@ -240,7 +240,7 @@ func (c *compactClient) saveRecord(ctx context.Context, payload map[string]any) 
 	content, _ := payload["content"].(string)
 	project, _ := payload["project_id"].(string)
 	if strings.TrimSpace(content) == "" {
-		return nil, errors.New("请填写速记正文")
+		return nil, errors.New("请填写工作记录正文")
 	}
 	input := map[string]any{"content": content, "project_id": project, "reminder_due_at": nil}
 	var result map[string]any
@@ -254,7 +254,7 @@ func (c *compactClient) saveRecord(ctx context.Context, payload map[string]any) 
 }
 func compactTaskInput(d compactDraft, operator string) (map[string]any, error) {
 	if strings.TrimSpace(d.ProjectID) == "" {
-		return nil, errors.New("请选择项目后添加任务")
+		return nil, errors.New("请选择项目后添加备忘")
 	}
 	name := ""
 	for _, line := range strings.Split(d.Content, "\n") {
@@ -263,7 +263,7 @@ func compactTaskInput(d compactDraft, operator string) (map[string]any, error) {
 		}
 	}
 	if name == "" {
-		return nil, errors.New("请填写任务标题，第一行将作为任务名称")
+		return nil, errors.New("请填写备忘标题，第一行将作为任务名称")
 	}
 	if len([]rune(name)) > 500 {
 		return nil, errors.New("任务标题不能超过500个字符，请缩短第一行；正文仍保留")
