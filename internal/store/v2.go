@@ -657,7 +657,7 @@ func (s *Store) BatchTasks(input map[string]any) (map[string]any, error) {
 			return nil, invalid("请提供批量修改字段")
 		}
 		for k := range changes {
-			if !oneOf(k, "status", "assignee", "plan_start", "plan_end") {
+			if !oneOf(k, "status", "assignee", "assignee_member_id", "plan_start", "plan_end") {
 				return nil, invalid("不允许批量修改字段: " + k)
 			}
 		}

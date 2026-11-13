@@ -87,6 +87,7 @@ func TestV8MigrationPreservesV7DataDraftSearchFrozenExportAndAudit(t *testing.T)
 	if schema != SchemaVersion {
 		t.Fatal(schema)
 	}
+	log["title"], log["variant"] = "", ""
 	for _, pair := range []struct {
 		k string
 		m map[string]any

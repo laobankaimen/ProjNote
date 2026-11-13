@@ -18,4 +18,11 @@ assert.equal(appendPlan('手写计划',''),'手写计划')
 assert.equal(candidatePlanText([{title:'同一内容',content:'同一内容'}]),'- 同一内容','record content is not duplicated when title already contains it')
 const legacy='## 后续计划\n- 旧版手写计划'
 assert.equal(appendTomorrowSection(legacy,addition),legacy+'\n'+addition+'\n','old generated plan section is reused without duplicating headings')
-console.log('PASS: candidate formatting, handwritten text preservation, existing tomorrow section, following sections, empty selection')
+assert.equal(appendPlan('- 待补充\n- 联系客户',addition),'- 联系客户\n'+addition,'plan-only placeholder is removed before appending')
+const placeholders='## 完成工作\n- 待补充\n\n### 后续计划\n\n- 待补充\n- 待补充设备参数\n- 手写计划\n\n### 问题\n- 待补充\n'
+const cleaned=appendTomorrowSection(placeholders,addition)
+assert.ok(cleaned.startsWith('## 完成工作\n- 待补充\n'),'other sections remain untouched')
+assert.ok(cleaned.includes('### 后续计划\n\n- 待补充设备参数\n- 手写计划\n'+addition),'only an exact placeholder line is removed, including legacy h3 plans')
+assert.ok(cleaned.endsWith('### 问题\n- 待补充\n'),'following sibling h3 remains intact')
+assert.equal(appendTomorrowSection(placeholders,''),placeholders,'empty additions never clean or otherwise change old content')
+console.log('PASS: candidate formatting, handwritten text preservation, exact legacy placeholder removal, existing h2/h3 plan sections, following sections, empty selection')

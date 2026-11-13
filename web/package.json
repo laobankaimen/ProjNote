@@ -1,6 +1,6 @@
 {
   "name": "projnote-web",
-  "version": "0.5.1",
+  "version": "0.6.0",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,7 +10,10 @@
     "test:drafts": "node scripts/test-drafts.mjs",
     "test:progress": "node scripts/test-progress.mjs",
     "test:next-plan": "node scripts/test-next-plan.mjs",
-    "test:input-tasks": "node scripts/test-input-tasks.mjs"
+    "test:input-tasks": "node scripts/test-input-tasks.mjs",
+    "test:log-save": "node scripts/test-log-save.mjs",
+    "test:people-lan": "node scripts/test-people-lan.mjs",
+    "test:task-reminders": "node scripts/test-task-reminders.mjs"
   },
   "dependencies": {
     "vue": "3.5.44",

@@ -238,7 +238,7 @@ func recalculateAs(tx *sql.Tx, projectID, changedID, actor string) error {
 			return invalid("任务层级不能形成环")
 		}
 	}
-	return nil
+	return endIneligibleTaskReminders(tx, projectID, actor)
 }
 
 func (s *Store) Settings() (map[string]any, error) {
@@ -370,8 +370,13 @@ func (s *Store) Today() (map[string]any, error) {
 		return nil, err
 	}
 	stats["time_minutes_today"] = minutes
+	taskReminders, err := taskReminderList(s.DB, map[string]string{"status": "pending", "due_to": boundaryEnd, "limit": "100"})
+	if err != nil {
+		return nil, err
+	}
+	stats["task_reminders_due"] = taskReminders["total"]
 	stats["reminders_due"] = reminders["total"]
-	return map[string]any{"date": d, "tasks": tasks, "records": records, "stats": stats, "reminders": reminders["items"], "time_minutes_today": minutes}, nil
+	return map[string]any{"date": d, "tasks": tasks, "records": records, "stats": stats, "reminders": reminders["items"], "task_reminders": taskReminders["items"], "time_minutes_today": minutes}, nil
 }
 func (s *Store) GenerateLog(input map[string]any) (map[string]any, error) {
 	s.Mu.RLock()
@@ -422,9 +427,6 @@ func (s *Store) GenerateLog(input map[string]any) (map[string]any, error) {
 	}
 	for _, section := range []struct{ kind, title, col string }{{"tasks", "任务进展", "updated_at"}, {"records", "现场记录", "occurred_at"}, {"issues", "问题跟踪", "updated_at"}} {
 		fmt.Fprintf(&b, "## %s\n\n", section.title)
-		if assignee != "" && section.kind == "records" {
-			b.WriteString("现场记录为本机录入的个人记录，按本次日期和项目范围归集。\n\n")
-		}
 		where := " WHERE deleted_at='' AND julianday(" + section.col + ")>=julianday(?) AND julianday(" + section.col + ")<julianday(?)"
 		args := []any{start.UTC().Format(time.RFC3339Nano), end.UTC().Format(time.RFC3339Nano)}
 		if pid != "" {
@@ -492,9 +494,9 @@ func (s *Store) GenerateLog(input map[string]any) (map[string]any, error) {
 	}
 	b.WriteString("\n")
 	if period == "day" {
-		b.WriteString("## 明日计划\n\n- 待补充\n")
+		b.WriteString("## 明日计划\n\n")
 	} else {
-		b.WriteString("## 后续计划\n\n- 待补充\n")
+		b.WriteString("## 后续计划\n\n")
 	}
 	return map[string]any{"content": b.String(), "log_date": date, "period_type": period, "project_id": pid}, nil
 }

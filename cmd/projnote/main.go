@@ -29,7 +29,7 @@ import (
 	"projnote/internal/store"
 )
 
-var version = "0.5.1-dev"
+var version = "0.6.0-dev"
 
 type runtimeInfo struct {
 	URL      string `json:"url"`
@@ -239,6 +239,8 @@ func run() (runErr error) {
 	manager := newBackupManager(dataDir, st)
 	app := &server.Server{Backup: manager, Store: st, DataDir: dataDir, Host: host, Version: version, RuntimeToken: info.Instance, Shutdown: cancel}
 	configureAutoStart(app, dataDir)
+	stopTaskReminders := startTaskReminders(ctx, st)
+	defer stopTaskReminders()
 	lanRuntime := server.NewLANRuntime(dataDir, info.URL, app.LANHandler(), st.RevokeAllLANSessions)
 	app.StartLAN, app.StopLAN, app.LANInfo = lanRuntime.Start, lanRuntime.Stop, lanRuntime.Info
 	app.RenewLANCertificate = lanRuntime.RenewCertificate

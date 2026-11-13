@@ -437,12 +437,12 @@ func TestPersonalGenerateLogFiltersPersonAndKeepsLegacyFourFields(t *testing.T) 
 			if person == "李四" {
 				other, minutes = "张三", 210
 			}
-			for _, expected := range []string{"人员：" + person + "（个人日志）", person + "专属任务", person + "负责问题", "本机现场记录", "本机录入的个人记录", fmt.Sprintf("合计 %d 分钟", minutes)} {
+			for _, expected := range []string{"人员：" + person + "（个人日志）", person + "专属任务", person + "负责问题", "本机现场记录", fmt.Sprintf("合计 %d 分钟", minutes)} {
 				if !strings.Contains(content, expected) {
 					t.Fatalf("personal draft missing %q: %s", expected, content)
 				}
 			}
-			for _, excluded := range []string{other + "专属任务", other + "负责问题", "合计 300 分钟"} {
+			for _, excluded := range []string{other + "专属任务", other + "负责问题", "合计 300 分钟", "本机录入的个人记录", "待补充"} {
 				if strings.Contains(content, excluded) {
 					t.Fatalf("personal draft leaked %q: %s", excluded, content)
 				}

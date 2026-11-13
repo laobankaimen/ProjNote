@@ -294,7 +294,6 @@ func projectDailyDraft(q queryer, projectID, date string) (map[string]any, error
 	groups := []map[string]any{}
 	var content strings.Builder
 	fmt.Fprintf(&content, "# %s · 项目日报 · %s\n\n", text(project["name"]), date)
-	content.WriteString("任务进度为生成时的当前快照；人员记录和工时按日志日期汇总。\n\n")
 	fmt.Fprintf(&content, "## 工时汇总\n\n- 合计 %d 分钟（%.2f 小时）\n\n", totalMinutes, float64(totalMinutes)/60)
 	for _, name := range names {
 		personEntries := byEntry[name]
@@ -417,8 +416,11 @@ func (s *Store) SaveProjectDailyLog(input map[string]any) (map[string]any, error
 		if projectID == "" || date == "" {
 			return nil, invalid("请选择项目与日报日期")
 		}
+		if saveAsNew, ok := input["save_as_new"].(bool); ok && saveAsNew {
+			return create(tx, "project_daily_logs", input)
+		}
 		var id string
-		err := tx.QueryRow("SELECT id FROM project_daily_logs WHERE project_id=? AND log_date=? AND deleted_at=''", projectID, date).Scan(&id)
+		err := tx.QueryRow("SELECT id FROM project_daily_logs WHERE project_id=? AND log_date=? AND variant='' AND deleted_at=''", projectID, date).Scan(&id)
 		in := copyMap(input)
 		delete(in, "id")
 		if err == sql.ErrNoRows {

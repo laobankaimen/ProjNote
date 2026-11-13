@@ -242,7 +242,7 @@ func (c *compactClient) saveRecord(ctx context.Context, payload map[string]any) 
 	if strings.TrimSpace(content) == "" {
 		return nil, errors.New("请填写速记正文")
 	}
-	input := map[string]any{"content": content, "project_id": project}
+	input := map[string]any{"content": content, "project_id": project, "reminder_due_at": nil}
 	var result map[string]any
 	if err := c.request(ctx, "POST", "/api/records", input, &result); err != nil {
 		return nil, err

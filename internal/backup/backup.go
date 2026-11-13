@@ -419,6 +419,27 @@ func Extract(archive, parent string) (string, Manifest, error) {
 			}
 		}
 
+		if err == nil && version >= 10 {
+			for _, spec := range []struct {
+				table, fields string
+				count         int
+			}{
+				{"tasks", "'assignee_member_id'", 1},
+				{"worklogs", "'title','variant'", 2},
+				{"project_daily_logs", "'title','variant'", 2},
+				{"task_reminders", "'id','task_id','due_at','notified_at','done_at','last_error','claim_until','created_at','updated_at','version','deleted_at'", 11},
+			} {
+				var count int
+				err = db.QueryRow("SELECT count(*) FROM pragma_table_info('" + spec.table + "') WHERE name IN (" + spec.fields + ")").Scan(&count)
+				if err == nil && count != spec.count {
+					err = errors.New("备份缺少成员、日志或任务提醒必需字段：" + spec.table)
+				}
+				if err != nil {
+					break
+				}
+			}
+		}
+
 	}
 	cerr := db.Close()
 	if err == nil {

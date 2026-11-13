@@ -158,6 +158,9 @@ func lanApplyScope(tx *sql.Tx, m, before map[string]any, input map[string]any) e
 			}
 			return invalid("分配任务必须属于成员项目")
 		}
+		if !retained && oneOf(task["status"], "done", "canceled") {
+			return fail("read_only", "已结束任务不能新指派负责人", 409)
+		}
 		if !retained && task["has_children"] == true {
 			return invalid("只能向成员分配有效叶子任务")
 		}
@@ -184,6 +187,36 @@ func lanApplyScope(tx *sql.Tx, m, before map[string]any, input map[string]any) e
 			return err
 		}
 	}
+	retainedTasks := map[string]bool{}
+	for _, task := range taskRows {
+		retainedTasks[text(task["id"])] = true
+	}
+	for taskID := range existing {
+		if retainedTasks[taskID] {
+			continue
+		}
+		task, e := getIncludingTrash(tx, "tasks", taskID, true)
+		if e != nil {
+			return e
+		}
+		// Completed/removed work retains its historical person and ID while
+		// its editable grant is withdrawn with project membership.
+		if !nonempty(task["deleted_at"]) && !oneOf(task["status"], "done", "canceled") && planningProjectWritable(tx, text(task["project_id"])) == nil {
+			if _, e = tx.Exec("UPDATE tasks SET assignee='',assignee_member_id=NULL,version=version+1,updated_at=? WHERE id=?", now(), taskID); e != nil {
+				return e
+			}
+			after, e := get(tx, "tasks", taskID)
+			if e != nil {
+				return e
+			}
+			if e = searchSync(tx, "tasks", after); e != nil {
+				return e
+			}
+			if e = audit(tx, "tasks", taskID, "lan_unassign", task, after); e != nil {
+				return e
+			}
+		}
+	}
 	if _, err = tx.Exec("DELETE FROM lan_member_tasks WHERE member_id=?", m["id"]); err != nil {
 		return err
 	}
@@ -191,8 +224,8 @@ func lanApplyScope(tx *sql.Tx, m, before map[string]any, input map[string]any) e
 		if _, err = tx.Exec("INSERT INTO lan_member_tasks(task_id,member_id)VALUES(?,?)", task["id"], m["id"]); err != nil {
 			return err
 		}
-		if text(task["assignee"]) != text(m["name"]) && !nonempty(task["deleted_at"]) && !oneOf(task["status"], "done", "canceled") && planningProjectWritable(tx, text(task["project_id"])) == nil {
-			if _, err = tx.Exec("UPDATE tasks SET assignee=?,version=version+1,updated_at=? WHERE id=?", m["name"], now(), task["id"]); err != nil {
+		if (text(task["assignee"]) != text(m["name"]) || text(task["assignee_member_id"]) != text(m["id"])) && !nonempty(task["deleted_at"]) && !oneOf(task["status"], "done", "canceled") && planningProjectWritable(tx, text(task["project_id"])) == nil {
+			if _, err = tx.Exec("UPDATE tasks SET assignee=?,assignee_member_id=?,version=version+1,updated_at=? WHERE id=?", m["name"], m["id"], now(), task["id"]); err != nil {
 				return err
 			}
 			after, e := get(tx, "tasks", text(task["id"]))

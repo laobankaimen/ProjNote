@@ -64,6 +64,7 @@ func TestV7MigrationFromV6PreservesDraftMonthFrozenSourceAndAudit(t *testing.T) 
 	if version != SchemaVersion {
 		t.Fatal("schema7 not applied", version)
 	}
+	log["title"], log["variant"] = "", ""
 	if got := getNow(t, s, "worklogs", text(log["id"])); !reflect.DeepEqual(got, log) {
 		t.Fatal("old month changed", got, log)
 	}

@@ -232,7 +232,7 @@ func TestCompactNativeClientWritesAndConflicts(t *testing.T) {
 	}
 	state.mu.Lock()
 	defer state.mu.Unlock()
-	if state.badHeader || len(state.records) != 1 || len(state.records[0]) != 2 || state.records[0]["content"] != "实际提交正文" {
+	if state.badHeader || len(state.records) != 1 || len(state.records[0]) != 3 || state.records[0]["content"] != "实际提交正文" {
 		t.Fatalf("unexpected POST: %#v", state.records)
 	}
 	if state.projectPages != 4 {

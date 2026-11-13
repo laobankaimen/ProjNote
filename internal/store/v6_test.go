@@ -76,10 +76,12 @@ func TestV6MigrationPreservesDraftLogsSnapshotsSearchAndAudit(t *testing.T) {
 		t.Fatal("schema6", version, err)
 	}
 	for _, original := range []map[string]any{day, week, replacement} {
+		original["title"], original["variant"] = "", ""
 		if got := getNow(t, s, "worklogs", text(original["id"])); !reflect.DeepEqual(got, original) {
 			t.Fatalf("changed log: got %v want %v", got, original)
 		}
 	}
+	trash["title"], trash["variant"] = "", ""
 	if got, e := getIncludingTrash(s.DB, "worklogs", text(trash["id"]), true); e != nil || !reflect.DeepEqual(got, trash) {
 		t.Fatal("changed trash", got, e)
 	}

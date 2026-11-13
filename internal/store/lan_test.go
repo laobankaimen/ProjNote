@@ -86,7 +86,7 @@ func TestV9MigrationFromV8PreservesSavedVersionsDraftExportsAndIdentity(t *testi
 	defer s.Close()
 	var version int
 	s.DB.QueryRow("PRAGMA user_version").Scan(&version)
-	if version != 9 {
+	if version != SchemaVersion {
 		t.Fatal(version)
 	}
 	if got := getNow(t, s, "requirements", text(r["id"])); !reflect.DeepEqual(got, r) {

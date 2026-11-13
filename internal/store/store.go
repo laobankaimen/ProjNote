@@ -19,7 +19,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const SchemaVersion = 9
+const SchemaVersion = 10
 
 type AppError struct {
 	Code    string
@@ -45,13 +45,13 @@ var columns = map[string][]string{
 	"plan_versions":      strings.Fields("id project_id number name description created_by created_at snapshot hash task_count version"),
 	"requirements":       strings.Fields("id project_id code title description acceptance_criteria owner source status revision acceptance_note change_note created_at updated_at version deleted_at"),
 	"projects":           strings.Fields("id code name customer phase manager start_date end_date status description created_at updated_at version deleted_at"),
-	"tasks":              strings.Fields("id project_id parent_id wbs_code name assignee plan_start plan_end progress status priority estimate_hours description actual_start actual_end created_at updated_at version sort_order deleted_at"),
+	"tasks":              strings.Fields("id project_id parent_id wbs_code name assignee assignee_member_id plan_start plan_end progress status priority estimate_hours description actual_start actual_end created_at updated_at version sort_order deleted_at"),
 	"records":            strings.Fields("id code project_id type title content location occurred_at tags attachments created_at updated_at version deleted_at"),
 	"issues":             strings.Fields("id code project_id title description severity source status owner due_at root_cause solution verify_result rejection_reason closed_at created_at updated_at version deleted_at"),
-	"worklogs":           strings.Fields("id project_id period_type log_date content created_at updated_at version deleted_at"),
+	"worklogs":           strings.Fields("id project_id period_type log_date content title variant created_at updated_at version deleted_at"),
 	"time_entries":       strings.Fields("id project_id task_id work_date minutes note created_at updated_at version deleted_at assignee"),
 	"team_daily_entries": strings.Fields("id project_id log_date person_name content next_plan blockers task_ids created_at updated_at version deleted_at"),
-	"project_daily_logs": strings.Fields("id project_id log_date content source_snapshot created_at updated_at version deleted_at"),
+	"project_daily_logs": strings.Fields("id project_id log_date content source_snapshot title variant created_at updated_at version deleted_at"),
 	"meeting_minutes":    strings.Fields("id code project_id title meeting_date location attendees content created_at updated_at version deleted_at"),
 	"reminders":          strings.Fields("id title project_id record_id due_at created_at updated_at version done_at deleted_at"),
 }
@@ -132,7 +132,7 @@ func migrateAfter(tx *sql.Tx, version int) error {
 	for _, step := range []struct {
 		version int
 		apply   func(*sql.Tx) error
-	}{{2, migrateV2}, {3, migrateV3}, {4, migrateV4}, {5, migrateV5}, {6, migrateV6}, {7, migrateV7}, {8, migrateV8}, {9, migrateV9}} {
+	}{{2, migrateV2}, {3, migrateV3}, {4, migrateV4}, {5, migrateV5}, {6, migrateV6}, {7, migrateV7}, {8, migrateV8}, {9, migrateV9}, {10, migrateV10}} {
 		if version < step.version {
 			if err := step.apply(tx); err != nil {
 				return fmt.Errorf("升级数据库至版本 %d: %w", step.version, err)
@@ -422,6 +422,9 @@ func searchSync(tx *sql.Tx, kind string, m map[string]any) error {
 	if kind == "worklogs" {
 		title = text(m["log_date"]) + " " + text(m["period_type"])
 	}
+	if oneOf(kind, "worklogs", "project_daily_logs") && nonempty(m["title"]) {
+		title = text(m["title"])
+	}
 	body := []string{}
 	for _, k := range []string{"code", "description", "content", "location", "root_cause", "solution", "verify_result", "owner", "assignee", "customer", "manager", "note", "work_date", "due_at", "person_name", "next_plan", "blockers", "attendees", "meeting_date", "acceptance_criteria", "source", "acceptance_note", "change_note"} {
 		if nonempty(m[k]) {
@@ -461,6 +464,9 @@ func cleanInput(kind string, input map[string]any, creating bool) (map[string]an
 		allowed[c] = true
 	}
 	for k, v := range input {
+		if (kind == "worklogs" || kind == "project_daily_logs") && k == "variant" {
+			return nil, invalid("日志标识由服务器生成")
+		}
 		if kind == "requirements" && k == "task_ids" {
 			out[k] = v
 			continue
@@ -484,7 +490,7 @@ func cleanInput(kind string, input map[string]any, creating bool) (map[string]an
 		if oneOf(k, "id", "created_at", "updated_at", "wbs_code", "sort_order", "closed_at", "deleted_at", "done_at") || k == "version" {
 			return nil, invalid("字段由服务器生成: " + k)
 		}
-		if v == nil && !oneOf(k, "project_id", "parent_id", "task_id", "record_id") {
+		if v == nil && !oneOf(k, "project_id", "parent_id", "task_id", "record_id", "assignee_member_id") {
 			return nil, invalid("字段不能为空值: " + k)
 		}
 		out[k] = v
@@ -726,10 +732,16 @@ func validate(tx *sql.Tx, kind string, m, before map[string]any) error {
 	case "team_daily_entries":
 		return validateTeamDailyEntry(tx, m)
 	case "project_daily_logs":
+		if err := validateLogTitle(m); err != nil {
+			return err
+		}
 		return validateProjectDailyLog(tx, m, before)
 	case "meeting_minutes":
 		return validateMeeting(tx, m)
 	case "worklogs":
+		if err := validateLogTitle(m); err != nil {
+			return err
+		}
 		if !nonempty(m["content"]) {
 			return invalid("日志内容不能为空")
 		}
@@ -759,7 +771,7 @@ func dbValue(k string, v any) any {
 		b, _ := json.Marshal(v)
 		return string(b)
 	}
-	if oneOf(k, "project_id", "parent_id", "task_id", "record_id") && text(v) == "" {
+	if oneOf(k, "project_id", "parent_id", "task_id", "record_id", "assignee_member_id") && text(v) == "" {
 		return nil
 	}
 	return v
@@ -787,7 +799,12 @@ func dbErr(err error) error {
 	return err
 }
 func insert(tx *sql.Tx, kind string, m map[string]any) error {
-	cols := columns[kind]
+	cols := []string{}
+	for _, c := range columns[kind] {
+		if !oneOf(c, "assignee_member_id", "title", "variant") || nonempty(m[c]) {
+			cols = append(cols, c)
+		}
+	}
 	args := []any{}
 	marks := []string{}
 	for _, c := range cols {
@@ -835,13 +852,20 @@ func create(tx *sql.Tx, kind string, input map[string]any) (map[string]any, erro
 	if kind == "plan_versions" {
 		return nil, immutablePlanError()
 	}
-	in, err := cleanInput(kind, input, true)
+	prepared, variant, err := logCreateInput(kind, input)
+	if err != nil {
+		return nil, err
+	}
+	in, err := cleanInput(kind, prepared, true)
 	if err != nil {
 		return nil, err
 	}
 	m := defaults(kind)
 	for k, v := range in {
 		m[k] = v
+	}
+	if kind == "worklogs" || kind == "project_daily_logs" {
+		m["variant"] = variant
 	}
 	if kind == "time_entries" && !nonempty(m["assignee"]) {
 		m["assignee"] = operator(tx)
@@ -854,6 +878,11 @@ func create(tx *sql.Tx, kind string, input map[string]any) (map[string]any, erro
 	}
 	if err = projectWritable(tx, text(m["project_id"]), kind); err != nil {
 		return nil, err
+	}
+	if kind == "tasks" {
+		if err = prepareTaskAssignee(tx, m, nil, input); err != nil {
+			return nil, err
+		}
 	}
 	if err = validate(tx, kind, m, nil); err != nil {
 		return nil, err
@@ -872,6 +901,11 @@ func create(tx *sql.Tx, kind string, input map[string]any) (map[string]any, erro
 	}
 	if err = insert(tx, kind, m); err != nil {
 		return nil, err
+	}
+	if kind == "tasks" {
+		if err = syncTaskAssignee(tx, m, nil, input); err != nil {
+			return nil, err
+		}
 	}
 	if kind == "requirements" {
 		if err = syncRequirementLinks(tx, m, nil, input); err != nil {
@@ -1030,6 +1064,11 @@ func updateAs(tx *sql.Tx, kind, id string, input map[string]any, actor string) (
 	if kind == "requirements" && text(m["status"]) == "accepted" && text(before["status"]) != "accepted" && !nonempty(in["acceptance_note"]) {
 		return nil, invalid("每次验收必须明确填写本次验收说明")
 	}
+	if kind == "tasks" {
+		if err = prepareTaskAssignee(tx, m, before, in); err != nil {
+			return nil, err
+		}
+	}
 	if err = validate(tx, kind, m, before); err != nil {
 		return nil, err
 	}
@@ -1054,7 +1093,7 @@ func updateAs(tx *sql.Tx, kind, id string, input map[string]any, actor string) (
 	sets := []string{}
 	args := []any{}
 	for _, c := range columns[kind] {
-		if c == "id" || c == "created_at" {
+		if c == "id" || c == "created_at" || c == "assignee_member_id" && before[c] == nil && !nonempty(m[c]) {
 			continue
 		}
 		sets = append(sets, c+"=?")
@@ -1070,10 +1109,8 @@ func updateAs(tx *sql.Tx, kind, id string, input map[string]any, actor string) (
 		return nil, fail("version_conflict", "内容已被修改，请刷新后重试", 409)
 	}
 	if kind == "tasks" && actor == "" {
-		if _, explicit := in["assignee"]; explicit && text(in["assignee"]) != text(before["assignee"]) {
-			if err = lanUnassignTask(tx, id); err != nil {
-				return nil, err
-			}
+		if err = syncTaskAssignee(tx, m, before, in); err != nil {
+			return nil, err
 		}
 	}
 	if kind == "tasks" {

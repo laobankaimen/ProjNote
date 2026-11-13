@@ -134,6 +134,14 @@ func bodyLimit(w http.ResponseWriter, r *http.Request, max int64) (map[string]an
 func (s *Server) api(w http.ResponseWriter, r *http.Request) {
 	p := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/"), "/"), "/")
 	kind := p[0]
+	if kind == "projects" && len(p) >= 3 && p[2] == "members" {
+		s.projectMembersAPI(w, r, p)
+		return
+	}
+	if kind == "task-reminders" {
+		s.taskRemindersAPI(w, r, p)
+		return
+	}
 	if kind == "system" && len(p) == 2 && p[1] == "autostart" {
 		s.autoStartAPI(w, r)
 		return

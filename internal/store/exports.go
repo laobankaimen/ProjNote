@@ -91,6 +91,9 @@ func exportSnapshot(q queryer, kind, id string) (map[string]any, error) {
 		period = "day"
 		scope = "项目团队日报"
 	}
+	if oneOf(kind, "worklogs", "project_daily_logs") && nonempty(entity["title"]) {
+		title = text(entity["title"])
+	}
 	if kind == "issues" {
 		scope = "问题记录"
 		title = text(entity["code"]) + " · " + text(entity["title"])

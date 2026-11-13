@@ -26,8 +26,8 @@ PRAGMA user_version=8;`)
 	return err
 }
 
-var planTaskFields = strings.Fields("id project_id parent_id sort_order wbs_code name plan_start plan_end assignee estimate_hours priority description version")
-var planComparedFields = strings.Fields("parent_id sort_order wbs_code name plan_start plan_end assignee estimate_hours priority description")
+var planTaskFields = strings.Fields("id project_id parent_id sort_order wbs_code name plan_start plan_end assignee assignee_member_id estimate_hours priority description version")
+var planComparedFields = strings.Fields("parent_id sort_order wbs_code name plan_start plan_end assignee assignee_member_id estimate_hours priority description")
 
 func planSnapshot(q queryer, pid string) (map[string]any, error) {
 	project, err := get(q, "projects", pid)
@@ -308,6 +308,11 @@ func (s *Store) comparePlanVersions(pid, fromID, toID string, includeSnapshots b
 		}
 		fields := []map[string]any{}
 		for _, k := range planComparedFields {
+			// Pre-roster snapshots omit stable identity. Treat that omission as
+			// an empty owner, without rewriting any saved immutable JSON.
+			if k == "assignee_member_id" && text(b[k]) == text(t[k]) {
+				continue
+			}
 			if !jsonEqual(b[k], t[k]) {
 				fields = append(fields, map[string]any{"field": k, "before": b[k], "after": t[k]})
 			}
